@@ -1,0 +1,13 @@
+[package]
+name = "hotstuff-consensus"
+description = "Chained HotStuff-2: blocks, quorum certificates, messages and replica state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+hotstuff-types.workspace = true
+hotstuff-crypto.workspace = true
+codec = { package = "parity-scale-codec", version = "3.0", default-features = false, features = ["derive"] }
+

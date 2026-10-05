@@ -1,0 +1,14 @@
+[package]
+name = "tbls"
+description = "Threshold-BLS adapter for hotstuff-crypto, with a worked certificate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+hotstuff-crypto.workspace = true
+hotstuff-types.workspace = true
+codec = { package = "parity-scale-codec", version = "3.0", default-features = false, features = ["derive"] }
+blsttc = "8.0.2"
+rand = "0.8"

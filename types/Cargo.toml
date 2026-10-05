@@ -1,0 +1,12 @@
+[package]
+name = "hotstuff-types"
+description = "The vocabulary of the protocol: committee indices, views, heights, block references, hashing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+derive_more = { version = "1.0", features = ["full"] }
+codec = { package = "parity-scale-codec", version = "3.0", default-features = false, features = ["derive"] }
+

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["consensus", "crypto", "examples/quint", "examples/tbls", "types"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Vladimir Aksenov"]
+
+[workspace.dependencies]
+hotstuff-types = { version = "0.1.0", path = "types" }
+hotstuff-crypto = { version = "0.1.0", path = "crypto" }
+hotstuff-consensus = { version = "0.1.0", path = "consensus" }
