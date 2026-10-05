@@ -1,0 +1,13 @@
+[package]
+name = "quint-counter"
+description = "Model-based testing with Quint: a counter spec driving a Rust implementation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+quint-connect = "0.1"
+serde = { version = "1", features = ["derive"] }
+# `switch!` expands to code that names `anyhow` directly, so it must be in scope.
+anyhow = "1"
