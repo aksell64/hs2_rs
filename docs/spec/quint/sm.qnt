@@ -16,9 +16,14 @@ module state_machine {
     lock_timer: Option[View],
   }
 
+  type SmOutput =
+  | NoSmOutput
+  | MissingBlock(Hash)
+
   type StepResult = {
     state: NodeState,
     net: Network,
+    out: SmOutput,
   }
 
   pure def packet_to_input(packet: Packet): DriverInput =
@@ -61,6 +66,17 @@ module state_machine {
       | ClearLockTimer(v) => if (state.lock_timer == Some(v)) state.with("lock_timer", None) else state
     }
 
+  pure def check_missing_parent(kv: KVStorage, input: DriverInput): SmOutput =
+    match input {
+      | NewProposal(signed) =>
+        val parent = signed.proposal.block.parent
+        match get_block_by_hash(kv, parent) {
+          | Some(_) => NoSmOutput
+          | None => MissingBlock(parent)
+        }
+      | _ => NoSmOutput
+    }
+
   pure def apply_state(state: NodeState, net: Network): StepResult =
     val received = pop_from_network(state, net)
     val queued =
@@ -71,12 +87,17 @@ module state_machine {
     val popped = pop_from_queue(queued)
     match popped.input {
       | Some(input) =>
-        val res = apply_driver(popped.state.driver, popped.state.kv, input)
-        val updated = popped.state.with("driver", res.driver).with("kv", res.kv)
-        {
-          state: res.out.foldl(updated, (s, o) => handle_driver_output(s, o)),
-          net: res.net.foldl(received.net, (acc, env) => send(acc, state.node_id, env.to, env.msg)),
-        }
-      | None => { state: popped.state, net: received.net }
+        val missing = check_missing_parent(popped.state.kv, input)
+        if (missing != NoSmOutput)
+          { state: popped.state, net: received.net, out: missing }
+        else
+          val res = apply_driver(popped.state.driver, popped.state.kv, input)
+          val updated = popped.state.with("driver", res.driver).with("kv", res.kv)
+          {
+            state: res.out.foldl(updated, (s, o) => handle_driver_output(s, o)),
+            net: res.net.foldl(received.net, (acc, env) => send(acc, state.node_id, env.to, env.msg)),
+            out: NoSmOutput,
+          }
+      | None => { state: popped.state, net: received.net, out: NoSmOutput }
     }
 }

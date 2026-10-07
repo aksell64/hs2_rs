@@ -6,6 +6,7 @@ module main {
   import pacemaker.* from "./pacemaker"
   import state_machine.* from "./sm"
   import invariants.* from "./invariants"
+  import blocksync.* from "./blocksync"
 
   pure val NODES: Set[NodeID] = 0.to(committee_size - 1)
   const FAULTY: Set[NodeID]
@@ -31,6 +32,7 @@ module main {
   var net: Network
   var qc_views: QCViewCollector
   var all_qcs: Set[CertifiedBlock]
+  var syncs: NodeID -> BlockSync
 
   pure def init_node(id: NodeID): NodeState =
     {
@@ -48,6 +50,7 @@ module main {
     net' = { inbox: CORRECT.mapBy(_ => []) },
     qc_views' = record_qc(Map(), GENESIS_QC),
     all_qcs' = Set(GENESIS_QC),
+    syncs' = CORRECT.mapBy(_ => init_blocksync),
   }
 
   action apply_step(id: NodeID): bool =
@@ -59,6 +62,23 @@ module main {
       net' = r.net,
       qc_views' = record_qcs_of(qc_views, r.state),
       all_qcs' = all_qcs.union(qcs_of(r.state)),
+      syncs' = match r.out {
+        | MissingBlock(hash) => syncs.put(id, request_block(syncs.get(id), hash))
+        | NoSmOutput => syncs
+      },
+    }
+
+  action sync_step(id: NodeID): bool =
+    val node = nodes.get(id)
+    val res = serve_requests(syncs.get(id), node.kv, all_blocks(nodes))
+    all {
+      res.blocksync != syncs.get(id),
+      nodes' = nodes.put(id, node.with("queue", res.inputs.concat(node.queue))),
+      prev_nodes' = nodes,
+      net' = net,
+      qc_views' = qc_views,
+      all_qcs' = all_qcs,
+      syncs' = syncs.put(id, res.blocksync),
     }
 
   action enqueue_timer(id: NodeID, node: NodeState, input: DriverInput): bool = all {
@@ -67,6 +87,7 @@ module main {
     net' = net,
     qc_views' = qc_views,
     all_qcs' = all_qcs,
+    syncs' = syncs,
   }
 
   pure def armed_view(timer: Option[View]): View =
@@ -121,6 +142,7 @@ module main {
       net' = net,
       qc_views' = qc_views,
       all_qcs' = all_qcs,
+      syncs' = syncs,
     }
   }
 
@@ -129,11 +151,15 @@ module main {
     any {
       apply_step(id),
       deliver_faulty(id),
+      sync_step(id),
     }
   }
 
   def has_messages(id: NodeID): bool =
     nodes.get(id).queue.length() > 0 or net.inbox.get(id).length() > 0
+
+  def has_sync_requests(id: NodeID): bool =
+    syncs.get(id).requested.size() > 0
 
   def has_armed_timer(id: NodeID): bool =
     nodes.get(id).view_timer != None or nodes.get(id).lock_timer != None
@@ -141,6 +167,7 @@ module main {
   def actors(dice: int): Set[NodeID] =
     CORRECT.filter(id => or {
       has_messages(id),
+      has_sync_requests(id),
       dice < TIMER_PERCENT and has_armed_timer(id),
       dice < FAULTY_PERCENT,
     })
@@ -154,6 +181,7 @@ module main {
       all { dice < FAULTY_PERCENT, deliver_faulty(id) },
       all { dice < TIMER_PERCENT, fire_view_timer(id) },
       all { dice < TIMER_PERCENT, fire_lock_timer(id) },
+      sync_step(id),
     }
   }
 
@@ -180,6 +208,7 @@ module main {
   def actors_gst(dice: int): Set[NodeID] =
     CORRECT.filter(id => or {
       has_messages(id),
+      has_sync_requests(id),
       view_timer_ready_gst(id),
       nodes.get(id).lock_timer != None,
       dice < FAULTY_PERCENT,
@@ -194,6 +223,7 @@ module main {
       all { dice < FAULTY_PERCENT, deliver_faulty(id) },
       all { view_timer_ready_gst(id), fire_view_timer(id) },
       fire_lock_timer(id),
+      sync_step(id),
     }
   }
 
