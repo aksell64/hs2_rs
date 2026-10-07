@@ -14,6 +14,7 @@ module driver {
   | ViewTimerFired(View)
   | LockTimerFired(View)
   | EnterView(View)
+  | BlockSynced(Block)
 
   type DriverOutput =
   | NewView(View)
@@ -70,6 +71,7 @@ module driver {
       | ViewTimerFired(v) => on_view_timer_fired(d, kv, v)
       | LockTimerFired(v) => on_lock_timer_fired(d, kv, v)
       | EnterView(v) => call_enter_view(d, kv, v)
+      | BlockSynced(_) => driver_no_change(d, kv)
     }
 
   pure def driver_no_change(d: Driver, kv: KVStorage): DriverResult =
