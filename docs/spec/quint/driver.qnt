@@ -55,7 +55,7 @@ module driver {
 
   pure def init_driver(id: NodeID, genesis: Block, genesis_qc: CertifiedBlock): Driver =
     {
-      consensus: init_consensus(genesis, genesis_qc),
+      consensus: init_consensus(id, genesis, genesis_qc),
       pacemaker: init_pacemaker(id, genesis_qc),
       collector: { generic_collectors: Map(), timeout_collectors: Map() },
       pending: Map(),

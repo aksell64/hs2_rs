@@ -152,7 +152,7 @@ With this contract the driver never sees a block whose parent is unknown, and th
   - `apply_step` routes `MissingBlock(hash)` from the step result into `request_block`;
   - `sync_step(id)` calls `serve_requests` and pushes the resulting inputs to the **front** of the node
     queue, so synced blocks are handled before regular messages (as Malachite's priority sync buffers);
-  - `sync_step` is part of `step`, `step_gst` and `step_no_timers`.
+  - `sync_step` is part of `step`, `step_fair` and `step_no_timers`.
 
 `source` is the union of all correct nodes' storages. This is a **demonstration of the problem blocksync
 solves**, not a protocol: a block is "fetched" as soon as any correct node has it. There are no requests,

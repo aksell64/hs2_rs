@@ -10,7 +10,14 @@ module main {
 
   pure val NODES: Set[NodeID] = 0.to(committee_size - 1)
   const FAULTY: Set[NodeID]
-  pure val CORRECT: Set[NodeID] = NODES.exclude(FAULTY)
+
+  // Mutants only (tools/mutants.py): nodes that run the protocol with a Byzantine strategy
+  // applied to their code and are excluded from the invariants. Set() in every model;
+  // a strategy run sets it together with FAULTY = Set().
+  const BYZANTINE: Set[NodeID]
+
+  pure val RUNNING: Set[NodeID] = NODES.exclude(FAULTY)
+  pure val CORRECT: Set[NodeID] = RUNNING.exclude(BYZANTINE)
   const MAX_VIEW: View
   const FAULTY_PERCENT: int
   const TIMER_PERCENT: int
@@ -45,12 +52,12 @@ module main {
     }
 
   action init = all {
-    nodes' = CORRECT.mapBy(id => init_node(id)),
-    prev_nodes' = CORRECT.mapBy(id => init_node(id)),
-    net' = { inbox: CORRECT.mapBy(_ => []) },
+    nodes' = RUNNING.mapBy(id => init_node(id)),
+    prev_nodes' = RUNNING.mapBy(id => init_node(id)),
+    net' = { inbox: RUNNING.mapBy(_ => []) },
     qc_views' = record_qc(Map(), GENESIS_QC),
     all_qcs' = Set(GENESIS_QC),
-    syncs' = CORRECT.mapBy(_ => init_blocksync),
+    syncs' = RUNNING.mapBy(_ => init_blocksync),
   }
 
   action apply_step(id: NodeID): bool =
@@ -147,7 +154,7 @@ module main {
   }
 
   action step_no_timers = {
-    nondet id = CORRECT.oneOf()
+    nondet id = RUNNING.oneOf()
     any {
       apply_step(id),
       deliver_faulty(id),
@@ -165,7 +172,7 @@ module main {
     nodes.get(id).view_timer != None or nodes.get(id).lock_timer != None
 
   def actors(dice: int): Set[NodeID] =
-    CORRECT.filter(id => or {
+    RUNNING.filter(id => or {
       has_messages(id),
       has_sync_requests(id),
       dice < TIMER_PERCENT and has_armed_timer(id),
@@ -175,7 +182,7 @@ module main {
   action step = {
     nondet dice = 0.to(99).oneOf()
     val candidates = actors(dice)
-    nondet id = (if (candidates.size() > 0) candidates else CORRECT).oneOf()
+    nondet id = (if (candidates.size() > 0) candidates else RUNNING).oneOf()
     any {
       all { has_messages(id) or candidates.size() == 0, apply_step(id) },
       all { dice < FAULTY_PERCENT, deliver_faulty(id) },
@@ -193,41 +200,58 @@ module main {
       val pcm = nodes.get(l).driver.pacemaker
       pcm.cur_view > v or (pcm.cur_view == v and pcm.proposed)
 
-  // After GST the view slot τ outlasts everything an honest leader needs to propose
-  // and deliver its proposal, so a view timer only expires once the node has drained
-  // its messages and the leader of that view has proposed or moved on.
-  def view_timer_ready_gst(id: NodeID): bool =
+  // Fairness assumption on the scheduler: a view timer is only allowed to fire once
+  // the useful work of the view is done.
+  //
+  // Guarantee: a correct node times out of view v only after the leader of v has proposed
+  // (or is faulty, or has left v) and the node has processed that proposal, i.e. every
+  // correct node gets a chance to vote in every view with a correct leader.
+  //
+  // Not guaranteed: the node may still time out after voting in v but before the next
+  // leader has sent the proposal of v+1 carrying QC(v); then it enters v+1 by the timer
+  // instead of by the certificate. Nothing bounds how far apart the views of different
+  // nodes can drift, and there is no asynchronous period before this mode starts.
+  def view_timer_ready_fair(id: NodeID): bool =
     val node = nodes.get(id)
     and {
+      // The node is in some view v and its slot for v is running.
       node.view_timer != None,
+      // No Case 2 wait is in progress: a leader waiting for statuses proposes before its
+      // view timer may fire (stands for the lock timer P_pc + Δ being shorter than τ).
       node.lock_timer == None,
+      // Everything already sent to the node (in the inbox) or produced by it (in the queue)
+      // has been processed (stands for messages being delivered well within τ).
       not(has_messages(id)),
+      // The leader of v has done its part: it proposed in v or already left v. Proposing and
+      // sending happen in one step, so a proposal of a correct leader is by now in this
+      // node's inbox, queue, pending buffer or already processed. A faulty leader counts as
+      // done: correct nodes must be able to time out on it.
       leader_finished(armed_view(node.view_timer)),
     }
 
-  def actors_gst(dice: int): Set[NodeID] =
-    CORRECT.filter(id => or {
+  def actors_fair(dice: int): Set[NodeID] =
+    RUNNING.filter(id => or {
       has_messages(id),
       has_sync_requests(id),
-      view_timer_ready_gst(id),
+      view_timer_ready_fair(id),
       nodes.get(id).lock_timer != None,
       dice < FAULTY_PERCENT,
     })
 
-  action step_gst = {
+  action step_fair = {
     nondet dice = 0.to(99).oneOf()
-    val candidates = actors_gst(dice)
-    nondet id = (if (candidates.size() > 0) candidates else CORRECT).oneOf()
+    val candidates = actors_fair(dice)
+    nondet id = (if (candidates.size() > 0) candidates else RUNNING).oneOf()
     any {
       all { has_messages(id) or candidates.size() == 0, apply_step(id) },
       all { dice < FAULTY_PERCENT, deliver_faulty(id) },
-      all { view_timer_ready_gst(id), fire_view_timer(id) },
+      all { view_timer_ready_fair(id), fire_view_timer(id) },
       fire_lock_timer(id),
       sync_step(id),
     }
   }
 
-  val agreement_inv = agreement(nodes)
+  val agreement_inv = agreement(CORRECT.mapBy(id => nodes.get(id)))
 
   val lock_monotonic_inv = CORRECT.forall(id => monotony_of_lock(nodes.get(id), prev_nodes.get(id)))
 
@@ -255,4 +279,11 @@ module main {
   }
 
   val no_commit_witness = CORRECT.forall(id => nodes.get(id).kv.committed_branch.length() == 0)
+
+  // Tail-forking: the block certified in view v is dropped by the certified block of view v + 1.
+  val tail_fork_witness =
+    val blocks = all_blocks(nodes)
+    qc_views.keys().exists(v => qc_views.keys().contains(v + 1) and
+      qc_views.get(v).exists(b => qc_views.get(v + 1).exists(c =>
+        blocks.keys().contains(c) and blocks.get(c).parent != b)))
 }
