@@ -26,6 +26,9 @@ module consensus {
     voted_view: View,
     exec_hash: Hash,
     exec_height: Height,
+
+    // used only by Byzantine strategies in tools/mutants.py.
+    id: NodeID,
   }
 
   type ConsensusResult = {
@@ -33,8 +36,9 @@ module consensus {
     out: ConsensusOutput,
   }
 
-  pure def init_consensus(genesis: Block, genesis_qc: CertifiedBlock): Consensus =
+  pure def init_consensus(id: NodeID, genesis: Block, genesis_qc: CertifiedBlock): Consensus =
     {
+      id: id,
       qc_lock: genesis_qc,
       voted_view: 0,
       exec_hash: genesis.hash,
