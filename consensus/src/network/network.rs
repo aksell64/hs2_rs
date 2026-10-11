@@ -1,7 +1,11 @@
+use crate::network::message::{Envelope, Recipient};
 use crate::network::peer::PeerKey;
+use crate::types::block::Command;
+use bytes::Bytes;
+use codec::Encode;
+use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::{NodeID, NodeMap};
 use std::fmt::{self, Display};
-use std::str::Bytes;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendError {
@@ -31,10 +35,24 @@ impl Display for SendError {
 
 impl std::error::Error for SendError {}
 
-trait Network {
+pub trait Network {
     type PeerKey: PeerKey;
     fn update_recipients(&mut self, m: NodeMap<Self::PeerKey>);
     fn send(&self, msg: Bytes, to: NodeID) -> Result<(), SendError>;
-    fn broadcast(&self, msg: Bytes);
+    fn broadcast(&self, msg: Bytes) -> Result<(), SendError>;
     fn next(&mut self) -> impl Future<Output = Option<(NodeID, Bytes)>> + Send;
+}
+
+pub fn send_envelope<S: Scheme, C: Command, N: Network>(
+    env: Envelope<S, C>,
+    net: &mut N,
+) -> Result<(), SendError> {
+    match env.to {
+        Recipient::All => {
+            net.broadcast(env.msg.encode().into())
+        },
+        Recipient::Node(node_id) => {
+            net.send(env.msg.encode().into(), node_id)
+        }
+    }
 }

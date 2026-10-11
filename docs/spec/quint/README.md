@@ -1,7 +1,8 @@
 ### Make targets
 
-The commands below are wrapped in `Makefile`; the GitHub Actions workflows (`spec-tests`, `spec-mutants`,
-`spec-sim`, run manually) call the same targets.
+The commands below are wrapped in `Makefile`; the GitHub Actions workflows `spec-tests`, `spec-mutants` and
+`spec-sim` call the same targets. They never run on their own: start one from the Actions tab ("Run workflow")
+and pick the branch, e.g. the branch of a pull request, or `gh workflow run spec-tests.yml --ref <branch>`.
 
     make test                                   # scenario tests
     make mutants                                # all mutants (MUTANT_SAMPLES, MUTANT_MAX_STEPS)

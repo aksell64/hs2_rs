@@ -1,2 +1,3 @@
-mod network;
-mod peer;
+pub mod network;
+pub mod peer;
+pub mod message;
