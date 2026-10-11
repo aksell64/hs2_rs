@@ -82,6 +82,9 @@ certificates are internal to blocksync.
         (pushed to the front of the node queue)      p_1 = the requested block
 ```
 
+> [design.md](design.md), Section 3, refines this interface: `MissingBlock` carries the QC of the missing
+> block and the parked proposal, and is emitted only behind a request gate.
+
 ### Output: `SmOutput.MissingBlock(Hash)` — `sm.qnt`
 
 ```quint
@@ -107,12 +110,12 @@ type DriverInput =
 
 Blocksync delivers blocks as `BlockSynced` inputs. The intended handling in the driver is:
 
-1. `ProcessQC(b.justify)` — the QC inside the block may raise `high_qc`;
+1. `ReceivedQC(b.justify)` — the QC inside the block may raise `high_qc`;
 2. store `b`;
 3. `update(b)` — advance the lock and commit;
 4. **no vote** — the view of a synced block is long gone.
 
-The handling is not implemented yet: the driver currently ignores `BlockSynced`.
+The handling is implemented in `on_block_synced` (`driver.qnt`).
 
 ### Why hashes and not heights or views
 
@@ -142,18 +145,6 @@ With this contract the driver never sees a block whose parent is unknown, and th
 
 ## 4. How it is wired in the Quint model
 
-- `blocksync.qnt` — a demonstration client:
-  - `BlockSync = { requested: Set[Hash] }`;
-  - `request_block(bs, hash)` records a request;
-  - `serve_requests(bs, kv, source)` returns the missing chain for every request it can satisfy as a list of
-    `BlockSynced` inputs, bottom-up, and drops the satisfied requests.
-- `main.qnt`:
-  - `var syncs: NodeID -> BlockSync` — one client per correct node;
-  - `apply_step` routes `MissingBlock(hash)` from the step result into `request_block`;
-  - `sync_step(id)` calls `serve_requests` and pushes the resulting inputs to the **front** of the node
-    queue, so synced blocks are handled before regular messages (as Malachite's priority sync buffers);
-  - `sync_step` is part of `step`, `step_fair` and `step_happy`.
-
-`source` is the union of all correct nodes' storages. This is a **demonstration of the problem blocksync
-solves**, not a protocol: a block is "fetched" as soon as any correct node has it. There are no requests,
-responses, peer selection or Byzantine replies.
+The demonstration client is replaced by the protocol from [design.md](design.md): `blocksync.qnt` (client
+and server), the request gate and the T2 trigger in `sm.qnt`, `BlockSynced` handling in `driver.qnt`, the
+sync network, faulty sync replies and invariants in `main.qnt`. See design.md, Sections 5 and 7.

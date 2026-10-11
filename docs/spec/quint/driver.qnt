@@ -51,11 +51,22 @@ module driver {
       | NewTC(tc) => on_timeout_certificate(d, kv, tc)
       | ViewTimerFired(v) => on_view_timer_fired(d, kv, v)
       | LockTimerFired(v) => on_lock_timer_fired(d, kv, v)
-      | BlockSynced(_) => driver_no_change(d, kv)
+      | BlockSynced(b) => on_block_synced(d, kv, b)
     }
 
   pure def driver_no_change(d: Driver, kv: KVStorage): DriverResult =
     { driver: d, kv: kv, net: [], timers: [], out: [] }
+
+  // A block delivered by blocksync: take its QC, store it, advance the lock and commit.
+  // No vote: the view of a synced block is in the past.
+  pure def on_block_synced(d: Driver, kv: KVStorage, b: Block): DriverResult =
+    if (get_block_by_hash(kv, b.hash) != None or get_block_by_hash(kv, b.parent) == None)
+      driver_no_change(d, kv)
+    else
+      val called = call_pacemaker(d, ReceivedQC(b.justify))
+      val processed = handle_pacemaker_result(d, kv, called)
+      val updated = call_update_locked(processed.driver, processed.kv, b)
+      processed.with("driver", updated.driver).with("kv", updated.kv)
 
   pure def add_out(o: DriverOutput, res: DriverResult): DriverResult =
     res.with("out", res.out.append(o))

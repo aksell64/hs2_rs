@@ -6,6 +6,7 @@ module scenariosTest {
   import state_machine.* from "./sm"
   import pacemaker.* from "./pacemaker"
   import invariants.* from "./invariants"
+  import storage.* from "./storage"
   import main(committee_size = 4, FAULTY = Set(0), BYZANTINE = Set(), MAX_VIEW = 6, FAULTY_PERCENT = 0, TIMER_PERCENT = 0).* from "./main"
 
   action unchanged: bool = all {
@@ -15,6 +16,8 @@ module scenariosTest {
     qc_views' = qc_views,
     all_qcs' = all_qcs,
     syncs' = syncs,
+    sync_net' = sync_net,
+    minted' = minted,
   }
 
   action inject(receiver: NodeID, packet: Packet): bool = all {
@@ -24,6 +27,8 @@ module scenariosTest {
     qc_views' = qc_views,
     all_qcs' = all_qcs,
     syncs' = syncs,
+    sync_net' = sync_net,
+    minted' = minted.union(match packet.msg { | ProposalMsg(proposal) => Set(proposal.block) | _ => Set() }),
   }
 
   def view_of(id: NodeID): View = nodes.get(id).driver.pacemaker.cur_view
@@ -144,4 +149,38 @@ module scenariosTest {
       .then(checked_step(1))
       .expect(voted_of(1) == 3)
       .expect(lock_of(1).view == 2)
+
+  // Blocksync. Pure checks of the request gate and of the driver handling of a synced block.
+  pure val qc_of_b1: CertifiedBlock = { certificate: { signature: QuorumCert(Set(1, 2, 3)) }, block: block_hash(1, 1), view: 1 }
+  pure val b1: Block = { hash: block_hash(1, 1), parent: 0, height: 1, justify: GENESIS_QC }
+  pure val b2: Block = { hash: block_hash(2, 2), parent: block_hash(1, 1), height: 2, justify: qc_of_b1 }
+  pure val genesis_kv = insert_block(empty_storage, GENESIS)
+
+  pure def proposal_of(sender: NodeID, block: Block, view: View): DriverInput =
+    NewProposal({ sender: sender, proposal: { block: block, view: view } })
+
+  // A missing parent is requested only for a proposal of the leader whose parent is certified by
+  // its own valid QC.
+  run syncGateTest =
+    val leader_proposal = proposal_of(2, b2, 2)
+    val bad_qc = b2.with("justify", qc_of_b1.with("certificate", { signature: QuorumCert(Set(1)) }))
+    val other_parent = b2.with("justify", GENESIS_QC)
+    init
+      .expect(check_missing_parent(genesis_kv, leader_proposal) == MissingBlock({ qc: qc_of_b1, parked: [leader_proposal] }))
+      .expect(check_missing_parent(genesis_kv, proposal_of(1, b2, 2)) == NoSmOutput)
+      .expect(check_missing_parent(genesis_kv, proposal_of(2, bad_qc, 2)) == NoSmOutput)
+      .expect(check_missing_parent(genesis_kv, proposal_of(2, other_parent, 2)) == NoSmOutput)
+      .expect(check_missing_parent(insert_block(genesis_kv, b1), leader_proposal) == NoSmOutput)
+
+  // A synced block is stored and its QC is taken, but nobody votes for it.
+  run blockSyncedStoresWithoutVoteTest =
+    val d = init_driver(1, GENESIS, GENESIS_QC)
+    val synced = apply_driver(d, insert_block(genesis_kv, b1), BlockSynced(b2))
+    val orphan = apply_driver(d, genesis_kv, BlockSynced(b2))
+    init
+      .expect(synced.kv.block_by_hash.keys().contains(b2.hash))
+      .expect(synced.driver.pacemaker.get_high_qc() == qc_of_b1)
+      .expect(synced.net.length() == 0)
+      .expect(synced.driver.consensus.voted_view == 0)
+      .expect(not(orphan.kv.block_by_hash.keys().contains(b2.hash)))
 }
