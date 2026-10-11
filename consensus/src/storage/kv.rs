@@ -1,3 +1,7 @@
+use crate::types::View;
+use crate::types::block::{Block, Command};
+use crate::types::certificate::CertifiedBlock;
+use hotstuff_crypto::sign::Scheme;
 use std::fmt::{self, Display};
 
 struct KVItem<K, V> {
@@ -62,4 +66,30 @@ pub trait KV: Send + Sync + 'static {
 pub trait KVBatch<K, V> {
     fn set(&mut self, key: K, value: V);
     fn remove(&mut self, key: K);
+}
+
+
+pub trait Storage<S: Scheme, C: Command> {
+    fn get_block_by_hash(&self, hash: &S::Digest) -> Result<Option<Block<S, C>>, KVError>;
+    fn get_cert_by_view(&self, view: View) -> Result<Option<CertifiedBlock<S>>, KVError>;
+    fn insert_block(&mut self, block: Block<S, C>) -> Result<(), KVError>;
+    fn commit_block(&mut self, block: Block<S, C>) -> Result<(), KVError>;
+
+    fn get_block_branch(&self, block: Block<S, C>, depth: usize) -> Result<Vec<Block<S, C>>, KVError> {
+        let mut branch = Vec::with_capacity(depth);
+        let mut current = Some(block);
+        while branch.len() < depth {
+            let Some(block) = current else { break };
+            current = self.get_block_by_hash(&block.parent)?;
+            branch.push(block);
+        }
+        Ok(branch)
+    }
+
+    fn get_parents_branch(&self, block: &Block<S, C>, depth: usize) -> Result<Vec<Block<S, C>>, KVError> {
+        match self.get_block_by_hash(&block.parent)? {
+            Some(parent) => self.get_block_branch(parent, depth),
+            None => Ok(Vec::new()),
+        }
+    }
 }

@@ -1,1 +1,1 @@
-mod pacemaker;
+pub mod pacemaker;
