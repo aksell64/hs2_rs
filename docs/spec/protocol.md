@@ -51,7 +51,7 @@ procedure onCommit(b)
 procedure onReceiveProposal(msg_v(generic, b_new, view))
     if v ≠ getLeader(view) then return                       // предлагает лидер своего view
     if ¬verifyQC(b_new.justify) then return                  // justify — настоящий QC, иначе весь proposal невалиден
-    onReceiveQC(b_new.justify)                               // [I1] ПЕРВОЙ, до проверок view
+    onReceiveQC(b_new.justify)                               // [I1] ПЕРВОЙ, до проверок view. TODO: мб сначала вызывать pacemaker OnReceiveQC, а потом onReceiveProposal без OnReceiveQC
     if view ≠ curView then return
     if ¬(b_new.justify.node ⪯ b_new) then return             // ancestry: b_new продолжает свой justify
                                                              //   (нет предков до justify.node — догрузить, не голосовать)

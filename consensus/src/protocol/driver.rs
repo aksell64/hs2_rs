@@ -1,12 +1,12 @@
-use crate::collector::collector::CollectorEvent::GenericVoteInput;
-use crate::collector::collector::{
+use crate::network::message::{Envelope, Message, Recipient};
+use crate::protocol::collector::CollectorEvent::GenericVoteInput;
+use crate::protocol::collector::{
     Collector, CollectorEvent, CollectorOutput, GenericCollectorOutput, TimeoutCollectorOutput,
 };
-use crate::consensus::consensus::ConsensusEvent::ReceivedProposal;
-use crate::consensus::consensus::{Consensus, ConsensusEvent, ConsensusOutput, ProposeRequest};
-use crate::network::message::{Envelope, Message, Recipient};
-use crate::pacemaker::pacemaker::{Pacemaker, PacemakerEvent, PacemakerOutput};
-use crate::storage::kv::{KVError, Storage};
+use crate::protocol::consensus::ConsensusEvent::ReceivedProposal;
+use crate::protocol::consensus::{Consensus, ConsensusEvent, ConsensusOutput, ProposeRequest};
+use crate::protocol::pacemaker::{Pacemaker, PacemakerEvent, PacemakerOutput};
+use crate::storage::kv::{KVError, ReadWriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
 use crate::types::certificate::{CertifiedBlock, CertifiedView};
@@ -51,6 +51,7 @@ pub enum DriverOutput<S: Scheme, C: Command> {
 pub struct DriverResult<S: Scheme, C: Command> {
     pub net: Vec<Envelope<S, C>>,
     pub out: Vec<DriverOutput<S, C>>,
+    pub committed: Vec<Block<S, C>>,
 }
 
 enum Task<S: Scheme, C: Command> {
@@ -90,14 +91,14 @@ impl<S: Scheme, C: Command> TasksStack<S, C> {
 }
 
 pub struct Driver<S: Scheme, C: Command> {
-    consensus: Consensus<S, C>,
+    consensus: Consensus<S>,
     pacemaker: Pacemaker<S>,
     collector: Collector<S>,
     pending: BTreeMap<View, Vec<(NodeID, Proposal<S, C>)>>,
 }
 
 impl<S: Scheme, C: Command> Driver<S, C> {
-    pub fn apply<DB: Storage<S, C>>(
+    pub fn apply<DB: ReadWriteStorage<S, C>>(
         &mut self,
         storage: &mut DB,
         evt: DriverEvent<S, C>,
@@ -164,7 +165,7 @@ impl<S: Scheme, C: Command> Driver<S, C> {
         }
     }
 
-    fn apply_nested<DB: Storage<S, C>>(
+    fn apply_nested<DB: ReadWriteStorage<S, C>>(
         &mut self,
         storage: &mut DB,
         mut stack: TasksStack<S, C>,
@@ -172,6 +173,7 @@ impl<S: Scheme, C: Command> Driver<S, C> {
         let mut result = DriverResult {
             net: Vec::new(),
             out: Vec::new(),
+            committed: Vec::new(),
         };
         while let Some(task) = stack.pop() {
             if let Some(out) = self.process_input(storage, task, &mut result)? {
@@ -181,30 +183,31 @@ impl<S: Scheme, C: Command> Driver<S, C> {
         Ok(result)
     }
 
-    fn process_input<DB: Storage<S, C>>(
+    fn process_input<DB: ReadWriteStorage<S, C>>(
         &mut self,
         storage: &mut DB,
         task: Task<S, C>,
         result: &mut DriverResult<S, C>,
     ) -> Result<Option<TaskOut<S, C>>, KVError> {
         match task {
-            Task::Pacemaker(evt) => Ok(self.pacemaker.apply(evt).map(TaskOut::Pacemaker)),
+            Task::Pacemaker(evt) => Ok(self.pacemaker.apply(storage, evt)?.map(TaskOut::Pacemaker)),
             Task::Consensus(evt) => {
-                let cur_view = self.pacemaker.get_current_view();
-                let high_qc = self.pacemaker.get_high_qc();
+                let cur_view = storage.get_cur_view()?;
+                let high_qc = storage.get_high_qc()?;
                 Ok(self
                     .consensus
-                    .apply(storage, cur_view, high_qc, evt)?
+                    .apply(storage, cur_view, &high_qc, evt)?
                     .map(TaskOut::Consensus))
             }
             Task::Collector(evt) => Ok(Some(TaskOut::Collector(self.collector.apply(evt)))),
             Task::StoreBlock(block) => {
-                storage.insert_block(block)?;
+                storage.insert_block(&block)?;
                 Ok(None)
             }
             Task::Commit(blocks) => {
                 for block in blocks {
-                    storage.commit_block(block)?;
+                    storage.commit_block(&block)?;
+                    result.committed.push(block);
                 }
                 Ok(None)
             }

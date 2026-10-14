@@ -1,10 +1,9 @@
-use crate::storage::kv::{KVError, Storage};
+use crate::storage::kv::{KVError, ReadStorage, ReadWriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
 use crate::types::certificate::CertifiedBlock;
 use crate::types::vote::Vote;
 use hotstuff_crypto::sign::Scheme;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 pub struct ProposeRequest<S: Scheme, C: Command> {
@@ -34,32 +33,20 @@ pub enum ConsensusOutput<S: Scheme, C: Command> {
     Propose(Proposal<S, C>),
 }
 
-pub struct Consensus<S: Scheme, C: Command> {
+pub struct Consensus<S: Scheme> {
     scheme: Arc<S>,
-    qc_lock: CertifiedBlock<S>,
-    voted_view: View,
-    exec_hash: S::Digest,
-    exec_height: u64,
-    _command: PhantomData<C>,
 }
 
 type ConsensusResult<S, C> = Result<Option<ConsensusOutput<S, C>>, KVError>;
 
-impl<S: Scheme, C: Command> Consensus<S, C> {
-    pub fn new(scheme: Arc<S>, genesis: &Block<S, C>, genesis_qc: CertifiedBlock<S>) -> Self {
-        Self {
-            scheme,
-            qc_lock: genesis_qc,
-            voted_view: 0,
-            exec_hash: genesis.hash,
-            exec_height: genesis.height,
-            _command: PhantomData,
-        }
+impl<S: Scheme> Consensus<S> {
+    pub fn new(scheme: Arc<S>) -> Self {
+        Self { scheme }
     }
 
-    pub fn apply<DB: Storage<S, C>>(
-        &mut self,
-        storage: &DB,
+    pub fn apply<C: Command, DB: ReadWriteStorage<S, C>>(
+        &self,
+        storage: &mut DB,
         cur_view: View,
         high_qc: &CertifiedBlock<S>,
         event: ConsensusEvent<S, C>,
@@ -72,7 +59,7 @@ impl<S: Scheme, C: Command> Consensus<S, C> {
         }
     }
 
-    fn on_receive_proposal(&self, proposal: Proposal<S, C>) -> Option<ConsensusOutput<S, C>> {
+    fn on_receive_proposal<C: Command>(&self, proposal: Proposal<S, C>) -> Option<ConsensusOutput<S, C>> {
         if !self.is_valid_qc(&proposal.block.justify) {
             return None;
         }
@@ -82,27 +69,33 @@ impl<S: Scheme, C: Command> Consensus<S, C> {
         })
     }
 
-    fn on_qc_processed<DB: Storage<S, C>>(
-        &mut self,
-        storage: &DB,
+    fn on_qc_processed<C: Command, DB: ReadWriteStorage<S, C>>(
+        &self,
+        storage: &mut DB,
         cur_view: View,
         proposal: Proposal<S, C>,
     ) -> ConsensusResult<S, C> {
         let block = proposal.block;
-        if proposal.view != cur_view || !Self::extends_justify(storage, &block)? {
+        if proposal.view != cur_view || !Self::extends_justify(&*storage, &block)? {
             return Ok(None);
         }
-        if !self.can_vote(&block, cur_view) {
+        if !self.can_vote(storage, &block, cur_view)? {
             return Ok(Some(ConsensusOutput::RejectVote(block)));
         }
-        self.voted_view = cur_view;
+        storage.update_voted_view(cur_view)?;
         Ok(Some(ConsensusOutput::ConfirmVote {
-            vote: Vote { view: cur_view, block: block.hash },
+            vote: Vote {
+                view: cur_view,
+                block: block.hash,
+            },
             block,
         }))
     }
 
-    fn extends_justify<DB: Storage<S, C>>(storage: &DB, block: &Block<S, C>) -> Result<bool, KVError> {
+    fn extends_justify<C: Command, DB: ReadStorage<S, C>>(
+        storage: &DB,
+        block: &Block<S, C>,
+    ) -> Result<bool, KVError> {
         if block.parent != block.justify.block {
             return Ok(false);
         }
@@ -112,44 +105,68 @@ impl<S: Scheme, C: Command> Consensus<S, C> {
         })
     }
 
-    fn can_vote(&self, block: &Block<S, C>, view: View) -> bool {
-        self.voted_view < view && block.justify.view >= self.qc_lock.view
+    fn can_vote<C: Command, DB: ReadStorage<S, C>>(
+        &self,
+        storage: &DB,
+        block: &Block<S, C>,
+        view: View,
+    ) -> Result<bool, KVError> {
+        let voted_view = storage.get_voted_view()?;
+        let locked_qc = storage.get_locked_qc()?;
+        if voted_view < view && block.justify.view >= locked_qc.view {
+            return Ok(true);
+        }
+        Ok(false)
     }
 
-    fn update<DB: Storage<S, C>>(&mut self, storage: &DB, b_star: Block<S, C>) -> ConsensusResult<S, C> {
-        if b_star.justify.view > self.qc_lock.view {
-            self.qc_lock = b_star.justify.clone();
+    fn update<C: Command, DB: ReadWriteStorage<S, C>>(
+        &self,
+        storage: &mut DB,
+        block: Block<S, C>,
+    ) -> ConsensusResult<S, C> {
+        let locked_qc = storage.get_locked_qc()?;
+        if block.justify.view > locked_qc.view {
+            storage.update_locked_qc(block.justify.clone())?;
         }
-        let Some(b_prime) = storage.get_block_by_hash(&b_star.justify.block)? else {
+        let Some(justify_block) = storage.get_block_by_hash(&block.justify.block)? else {
             return Ok(None);
         };
-        let Some(b) = storage.get_block_by_hash(&b_prime.justify.block)? else {
+        let Some(b) = storage.get_block_by_hash(&justify_block.justify.block)? else {
             return Ok(None);
         };
-        if b_prime.parent == b.hash
-            && b_star.justify.view == b_prime.justify.view + 1
-            && b.height > self.exec_height
+
+        let exec_height = storage.get_exec_height()?;
+        if justify_block.parent == b.hash
+            && block.justify.view == justify_block.justify.view + 1
+            && b.height > exec_height
         {
-            self.commit_up_to(storage, b)
+            let exec_hash = storage.get_exec_hash()?;
+            self.commit_up_to(storage, b, exec_height, exec_hash)
         } else {
             Ok(None)
         }
     }
 
-    fn commit_up_to<DB: Storage<S, C>>(&mut self, storage: &DB, target: Block<S, C>) -> ConsensusResult<S, C> {
-        let depth = (target.height - self.exec_height) as usize;
+    fn commit_up_to<C: Command, DB: ReadWriteStorage<S, C>>(
+        &self,
+        storage: &mut DB,
+        target: Block<S, C>,
+        exec_height: u64,
+        exec_hash: S::Digest,
+    ) -> ConsensusResult<S, C> {
+        let depth = (target.height - exec_height) as usize;
         let (hash, height) = (target.hash, target.height);
         let mut branch = storage.get_block_branch(target, depth)?;
-        if branch.len() != depth || branch[depth - 1].parent != self.exec_hash {
+        if branch.len() != depth || branch[depth - 1].parent != exec_hash {
             return Ok(None);
         }
-        self.exec_hash = hash;
-        self.exec_height = height;
+        storage.update_exec_hash(hash)?;
+        storage.update_exec_height(height)?;
         branch.reverse();
         Ok(Some(ConsensusOutput::Commit(branch)))
     }
 
-    fn on_propose<DB: Storage<S, C>>(
+    fn on_propose<C: Command, DB: ReadStorage<S, C>>(
         &self,
         storage: &DB,
         high_qc: &CertifiedBlock<S>,
@@ -165,7 +182,10 @@ impl<S: Scheme, C: Command> Consensus<S, C> {
             justify: high_qc.clone(),
             height: parent.height + 1,
         };
-        Ok(Some(ConsensusOutput::Propose(Proposal { block, view: request.view })))
+        Ok(Some(ConsensusOutput::Propose(Proposal {
+            block,
+            view: request.view,
+        })))
     }
 
     fn is_valid_qc(&self, qc: &CertifiedBlock<S>) -> bool {

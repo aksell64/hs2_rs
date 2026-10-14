@@ -35,12 +35,16 @@ impl Display for SendError {
 
 impl std::error::Error for SendError {}
 
+pub enum NetworkEvent {
+    Message { from: NodeID, bytes: Bytes },
+}
+
 pub trait Network {
     type PeerKey: PeerKey;
     fn update_recipients(&mut self, m: NodeMap<Self::PeerKey>);
     fn send(&self, msg: Bytes, to: NodeID) -> Result<(), SendError>;
     fn broadcast(&self, msg: Bytes) -> Result<(), SendError>;
-    fn next(&mut self) -> impl Future<Output = Option<(NodeID, Bytes)>> + Send;
+    fn next(&mut self) -> impl Future<Output = Option<NetworkEvent>> + Send;
 }
 
 pub fn send_envelope<S: Scheme, C: Command, N: Network>(

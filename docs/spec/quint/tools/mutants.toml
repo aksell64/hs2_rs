@@ -220,3 +220,93 @@ file = "consensus.qnt"
 old = '''consensus: c.with("voted_view", cur_view),'''
 new = '''consensus: c.with("voted_view", cur_view)
           .with("deviations", c.deviations + (if (c.voted_view >= cur_view) 1 else 0)),'''
+
+[[entry]]
+name = "no_direct_link_equivocate"
+expect = "safe"
+byzantine = [3]
+committee_size = 4
+max_view = 20
+invariant = "safety_inv"
+step = "step"
+witnesses = ["direct_link_mattered_witness"]
+
+[[entry.changes]]
+file = "driver.qnt"
+old = '''      | Propose(proposal) =>
+        val result = driver_no_change(proposed.driver, kv)
+        add_net_msg(All, ProposalMsg(proposal), result)'''
+new = '''      | Propose(proposal) =>
+        val result = driver_no_change(proposed.driver, kv)
+        if (is_byzantine(d.pacemaker.id))
+          val other = proposal.with("block", proposal.block.with("hash", block_variant_hash(proposal.view, d.pacemaker.id, 1)))
+          val consensus = result.driver.consensus
+          val counted = result.with("driver", result.driver.with("consensus", consensus.with("deviations", consensus.deviations + 1)))
+          0.to(committee_size - 1).fold(counted, (r, n) =>
+            val first = if (n % 2 == 0) proposal else other
+            val second = if (n % 2 == 0) other else proposal
+            add_net_msg(Node(n), ProposalMsg(second), add_net_msg(Node(n), ProposalMsg(first), r)))
+        else
+          add_net_msg(All, ProposalMsg(proposal), result)'''
+
+[[entry.changes]]
+file = "consensus.qnt"
+old = '''if (b_prime.parent == b.hash
+                and b_star.justify.view'''
+new = '''if (b_star.justify.view'''
+
+[[entry.changes]]
+file = "consensus.qnt"
+old = '''commit_up_to(locked, b, kv)'''
+new = '''commit_up_to(locked.with("deviations", locked.deviations + (if (b_prime.parent != b.hash) 1 else 0)), b, kv)'''
+
+[[entry.changes]]
+file = "main.qnt"
+old = '''  val safety_inv = and {'''
+new = '''  val direct_link_mattered_witness = CORRECT.exists(id => nodes.get(id).driver.consensus.deviations > 0)
+
+  val safety_inv = and {'''
+
+[[entry]]
+name = "no_direct_link_tail_fork"
+expect = "safe"
+byzantine = [3]
+committee_size = 4
+max_view = 20
+invariant = "safety_inv"
+step = "step"
+witnesses = ["tail_fork_witness", "direct_link_mattered_witness"]
+
+[[entry.changes]]
+file = "consensus.qnt"
+old = '''    match get_block_by_hash(kv, high_qc.block) {
+      | None => no_change(c)
+      | Some(parent) =>
+        val block = create_leaf(request.hash, parent.hash, high_qc, parent.height + 1)
+        {
+          consensus: c,'''
+new = '''    val qc = if (is_byzantine(c.id)) c.qc_lock else high_qc
+    match get_block_by_hash(kv, qc.block) {
+      | None => no_change(c)
+      | Some(parent) =>
+        val block = create_leaf(request.hash, parent.hash, qc, parent.height + 1)
+        {
+          consensus: c.with("deviations", c.deviations + (if (qc.view < high_qc.view) 1 else 0)),'''
+
+[[entry.changes]]
+file = "consensus.qnt"
+old = '''if (b_prime.parent == b.hash
+                and b_star.justify.view'''
+new = '''if (b_star.justify.view'''
+
+[[entry.changes]]
+file = "consensus.qnt"
+old = '''commit_up_to(locked, b, kv)'''
+new = '''commit_up_to(locked.with("deviations", locked.deviations + (if (b_prime.parent != b.hash) 1 else 0)), b, kv)'''
+
+[[entry.changes]]
+file = "main.qnt"
+old = '''  val safety_inv = and {'''
+new = '''  val direct_link_mattered_witness = CORRECT.exists(id => nodes.get(id).driver.consensus.deviations > 0)
+
+  val safety_inv = and {'''
