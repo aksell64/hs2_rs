@@ -6,6 +6,7 @@ module state_machine {
   import collector.* from "./collector"
   import driver.* from "./driver"
   import network.* from "./network"
+  import effects.* from "./effects"
 
   type NodeState = {
     node_id: NodeID,
@@ -59,8 +60,11 @@ module state_machine {
 
   pure def handle_driver_output(state: NodeState, out: DriverOutput): NodeState =
     match out {
-      | NewView(v) => push_to_queue_front(state, EnterView(v))
       | Replay(input) => push_to_queue_front(state, input)
+    }
+
+  pure def apply_timer(state: NodeState, t: TimerCommand): NodeState =
+    match t {
       | SetViewTimer(v) => state.with("view_timer", Some(v))
       | SetLockTimer(v) => state.with("lock_timer", Some(v))
       | ClearLockTimer(v) => if (state.lock_timer == Some(v)) state.with("lock_timer", None) else state
@@ -94,7 +98,7 @@ module state_machine {
           val res = apply_driver(popped.state.driver, popped.state.kv, input)
           val updated = popped.state.with("driver", res.driver).with("kv", res.kv)
           {
-            state: res.out.foldl(updated, (s, o) => handle_driver_output(s, o)),
+            state: res.timers.foldl(res.out.foldl(updated, (s, o) => handle_driver_output(s, o)), (s, tc) => apply_timer(s, tc)),
             net: res.net.foldl(received.net, (acc, env) => send(acc, state.node_id, env.to, env.msg)),
             out: NoSmOutput,
           }

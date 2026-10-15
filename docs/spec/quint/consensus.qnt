@@ -9,13 +9,11 @@ module consensus {
 
   type ConsensusInput =
   | ReceivedProposal(Proposal)
-  | QCProcessed(Proposal)
   | Update(Block)
   | MakeProposal(ProposeRequest)
 
   type ConsensusOutput =
   | NoOutput
-  | ReceiveQC(CertifiedBlock)
   | ConfirmVote(GenericVote)
   | RejectVote(Block)
   | Commit(List[Block])
@@ -52,8 +50,7 @@ module consensus {
       high_qc: CertifiedBlock,
       input: ConsensusInput): ConsensusResult =
     match input {
-      | ReceivedProposal(proposal) => on_receive_proposal(c, proposal)
-      | QCProcessed(proposal) => on_qc_processed(c, kv, cur_view, proposal)
+      | ReceivedProposal(proposal) => on_receive_proposal(c, kv, cur_view, proposal)
       | Update(block) => update(c, block, kv)
       | MakeProposal(request) => on_propose(c, kv, high_qc, request)
     }
@@ -61,13 +58,7 @@ module consensus {
   pure def no_change(c: Consensus): ConsensusResult =
     { consensus: c, out: NoOutput }
 
-  pure def on_receive_proposal(c: Consensus, proposal: Proposal): ConsensusResult =
-    if (is_valid_qc(proposal.block.justify))
-      { consensus: c, out: ReceiveQC(proposal.block.justify) }
-    else
-      no_change(c)
-
-  pure def on_qc_processed(
+  pure def on_receive_proposal(
       c: Consensus,
       kv: KVStorage,
       cur_view: View,
@@ -93,21 +84,21 @@ module consensus {
   pure def can_vote(c: Consensus, block: Block, view: View): bool =
     c.voted_view < view and block.justify.view >= c.qc_lock.view
 
-  pure def update(c: Consensus, b_star: Block, kv: KVStorage): ConsensusResult =
+  pure def update(c: Consensus, new_block: Block, kv: KVStorage): ConsensusResult =
     val locked =
-      if (b_star.justify.view > c.qc_lock.view)
-        c.with("qc_lock", b_star.justify)
+      if (new_block.justify.view > c.qc_lock.view)
+        c.with("qc_lock", new_block.justify)
       else
         c
 
-    match get_block_by_hash(kv, b_star.justify.block) {
+    match get_block_by_hash(kv, new_block.justify.block) {
       | None => no_change(locked)
       | Some(b_prime) =>
         match get_block_by_hash(kv, b_prime.justify.block) {
           | None => no_change(locked)
           | Some(b) =>
             if (b_prime.parent == b.hash
-                and b_star.justify.view == b_prime.justify.view + 1
+                and new_block.justify.view == b_prime.justify.view + 1
                 and b.height > locked.exec_height)
               commit_up_to(locked, b, kv)
             else

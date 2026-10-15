@@ -123,10 +123,36 @@ Options:
 - `--samples` / `--max-steps` — number and length of traces for simulation (default 300 / 300).
 - `--seed=0x...` — reproduce a run.
 - `--verbose` — print the Quint output.
-- `--entries` — another TOML file with mutants.
+- `--entries` — another directory with mutant files.
 
-Mutants are listed in `tools/mutants.toml`. `changes` is a list of replacements of the string `old` with `new`
-in `file` (each string must occur exactly once, otherwise the mutant is reported as stale). A mutant is checked either
+Mutants are files in `tools/mutants/`, one per mutant, `<name>.md`:
+
+````markdown
+# lock_any
+
+expect: violation
+test: lockNeverDecreasesTest
+
+What the mutation does, and the last result.
+
+```diff
+--- consensus.qnt
+-      if (new_block.justify.view > c.qc_lock.view)
++      if (true)
+```
+````
+
+- `# <name>` — the first line, equal to the file name.
+- Header — `key: value` lines right after the title, up to the first blank line: `expect`, `test`, or `invariant`
+  and `step` (and `model` without `byzantine`), `byzantine` (node ids), `committee_size`, `max_view`, `witnesses`.
+  An unknown key is an error.
+- Text after the header is for the reader and is ignored by the script.
+- Every ```` ```diff ```` block is applied. `--- <file>` starts a change of that file; in the lines below, `-` is only in
+  the old text, `+` only in the new text, a space in both (context to make the old text unique). The rest of the line
+  is taken as is, indentation included. The old text must occur exactly once in the file, otherwise the mutant is
+  reported as stale.
+
+A mutant is checked either
 
 - by simulation: `invariant`, `step` (and `model` for scope `all`) — `quint run` with these options, or
 - by a test: `test` — the test from `scenarios_test.qnt`.
@@ -147,17 +173,19 @@ A mutation that rarely fires gives an almost vacuous `success`, so such a mutant
 refuses a mutant that does not). The witness `deviation_witness` reports in how many traces a Byzantine node deviated
 at least once: `deviated in 1 of 300 traces`.
 
-| mutant | scope | change in the protocol | checked by | expect | status |
-|---|---|---|---|---|---|
-| `no_lock_check` | all | `consensus.qnt`: `c.voted_view < view and block.justify.view >= c.qc_lock.view` → `c.voted_view < view` | test `voteRespectsLockTest` | violation | success (simulation with `lock_protection_inv` does not catch it: the faulty node rarely proposes on an old QC and a fork QC needs a quorum) |
-| `lock_any` | all | `consensus.qnt`: `if (b_star.justify.view > c.qc_lock.view)` → `if (true)` | test `lockNeverDecreasesTest` | violation | success (also caught by simulation with `lock_monotonic_inv`) |
-| `vote_past_lock` | `n3` of n = 4 | `consensus.qnt`: `c.voted_view < view and block.justify.view >= c.qc_lock.view` → `c.voted_view < view and (block.justify.view >= c.qc_lock.view or is_byzantine(c.id))` | simulation, `safety_inv`, `step` | safe | success, but almost vacuously: correct leaders rarely propose below a lock, the Byzantine node deviated in 1–6 of 300 traces with `step` and never with `step_fair` |
-| `propose_old_qc` | `n3` of n = 4 | `consensus.qnt`, `on_propose`: a Byzantine leader builds its block on the genesis QC instead of `high_qc` (`val qc = if (is_byzantine(c.id)) genesis_qc else high_qc`) | simulation, `safety_inv`, `step` | safe | success; deviates in almost every trace (299 of 300), also with `step_fair` and together with `vote_past_lock` |
-| `no_lock_check_vs_old_qc` | `no_lock_check` on all nodes, `propose_old_qc` on `n3` of n = 4 | both changes above | simulation, `lock_protection_inv`, `step` | violation | success: with a leader that proposes on the genesis QC, correct replicas without the lock check certify a fork of a committed block (also with `step_fair`) |
-| `silent` | `n3` of n = 4 | `sm.qnt`, `apply_state`: `net: res.net.foldl(received.net, ...)` → `net: if (is_byzantine(state.node_id)) received.net else res.net.foldl(received.net, ...)` — the node handles everything but sends nothing (no votes, proposals, wishes, statuses, TC relays) | simulation, `safety_inv`, `step` | safe | success, deviates in every trace, also with `step_fair`; commits still happen with `step_fair` |
-| `tail_fork` | `n3` of n = 4 | `consensus.qnt`, `on_propose`: a Byzantine leader of v + 1 builds on its lock QC(v − 1) instead of `high_qc` = QC(v) (`val qc = if (is_byzantine(c.id)) c.qc_lock else high_qc`), dropping the block of view v | simulation, `safety_inv`, `step`, witness `tail_fork_witness` | safe | success; deviates in 295 of 300 traces, the fork gets a QC (`tail_fork_witness`) in 276 of 300 (24 of 300 with all nodes correct) |
-| `equivocate` | `n3` of n = 4 | `driver.qnt`, `on_propose_request`: a Byzantine leader sends every node two blocks of its view (hash versions 0 and 1) instead of one broadcast; even nodes get version 0 first, odd nodes version 1 first | simulation, `safety_inv`, `step` | safe | success; deviates in almost every trace |
-| `equivocate_and_double_vote` | `n3` of n = 4 | `equivocate` plus `consensus.qnt`, `can_vote`: `c.voted_view < view` → `(c.voted_view < view or is_byzantine(c.id))` — the Byzantine node votes for both blocks | simulation, `safety_inv`, `step` | safe | success |
+Mutants:
+
+- [`equivocate`](tools/mutants/equivocate.md) — byzantine 3, safety_inv, expect safe
+- [`equivocate_and_double_vote`](tools/mutants/equivocate_and_double_vote.md) — byzantine 3, safety_inv, expect safe
+- [`lock_any`](tools/mutants/lock_any.md) — all, lockNeverDecreasesTest, expect violation
+- [`no_direct_link_equivocate`](tools/mutants/no_direct_link_equivocate.md) — byzantine 3, safety_inv, expect safe
+- [`no_direct_link_tail_fork`](tools/mutants/no_direct_link_tail_fork.md) — byzantine 3, safety_inv, expect safe
+- [`no_lock_check`](tools/mutants/no_lock_check.md) — all, voteRespectsLockTest, expect violation
+- [`no_lock_check_vs_old_qc`](tools/mutants/no_lock_check_vs_old_qc.md) — byzantine 3, lock_protection_inv, expect violation
+- [`propose_old_qc`](tools/mutants/propose_old_qc.md) — byzantine 3, safety_inv, expect safe
+- [`silent`](tools/mutants/silent.md) — byzantine 3, safety_inv, expect safe
+- [`tail_fork`](tools/mutants/tail_fork.md) — byzantine 3, safety_inv, expect safe
+- [`vote_past_lock`](tools/mutants/vote_past_lock.md) — byzantine 3, safety_inv, expect safe
 
 `once_qc_in_view_inv` has no calibrating mutant: the vote collector keeps one vote per sender and at most one QC
 per view, so a correct leader never builds a second QC in a view even if correct nodes vote twice

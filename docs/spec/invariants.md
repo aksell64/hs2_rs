@@ -1,6 +1,6 @@
 # Инварианты для Quint (consensus-ядро HotStuff-2, chained)
 
-Область: только consensus-ядро (createLeaf / update / onReceiveProposal / onReceiveQC).
+Область: только consensus-ядро (createLeaf / update / NewProposal / onReceiveQC).
 Сертификаты абстрактные (QC = множество голосов ≥ 2f+1), подписи не моделируются.
 Pacemaker, верификация подписей, ограничение памяти — вне модели.
 
@@ -52,7 +52,7 @@ n = 3f+1, кворум = n − f = 2f+1. Нотация: `X ⪯ Y` — X пре�
 
 - **I8 (ancestry).** Каждый сертифицированный блок расширяет свой justify.
   `∀ certified b: b.justify.node ⪯ b`
-  Следствие ancestry-проверки в onReceiveProposal; нужен в шаге доказательства.
+  Следствие ancestry-проверки в NewProposal; нужен в шаге доказательства.
   Забыта проверка ancestry (баг #2b) → I8 падает → I7 недоказуем.
 
 ---
@@ -72,6 +72,52 @@ IndInv := I1 ∧ I2 ∧ I3 ∧ I5 ∧ I6 ∧ I8 ∧ I9 ∧ I10 ∧ I7
 ```
 Проверяется `IndInv ∧ Step ⟹ IndInv'`. С первого раза, скорее всего, не пройдёт —
 Apalache покажет ломающий переход, добавляешь недостающий конъюнкт. Это и есть докрутка.
+
+---
+
+## Слой 4 — хранилище и blocksync (локальные, вне IndInv)
+
+- **I11 (замкнутость вниз).** Хранилище = закоммиченная цепочка (genesis … `b_exec`) плюс
+  незакоммиченные потомки `b_exec`; у любого блока, кроме genesis, родитель тоже в хранилище.
+  `∀ b ∈ storage: (b ⪯ b_exec ∨ b_exec ⪯ b) ∧ (b ≠ genesis ⟹ parent(b) ∈ storage)`
+  Блоки чужих веток, ответвившихся ниже `b_exec`, не храним. Следствия: `commit_up_to` всегда находит ветку до `b_exec`;
+  blocksync отдаёт блоки строго снизу вверх, непрерывным префиксом. Держится в одном месте —
+  `StoreBlock`: сохранять, только если родитель есть и `height = parent.height + 1`.
+
+- **I12 (QC только на сохранённые блоки).** `qc_high.node ∈ storage ∧ qc_lock.node ∈ storage`.
+  Для `qc_lock` выполняется (лок берётся из justify сохраняемого блока = его родитель).
+  Для `qc_high` сейчас нет: `onReceiveQC(b_new.justify)` идёт до проверки родителя [I1],
+  и лидер с `qc_high` на неизвестный блок не может предложить.
+
+### Контракт consensus ↔ blocksync
+
+**Запрос (consensus → sync).**
+```
+MissingBlock { tip: B, tip_height: h_B, from: p, known: (h_exec, hash(b_exec)) }
+```
+- `B ∉ storage`; `h_B > h_exec`.
+- `h_B` берётся из proposal: `B = b_new.parent`, `h_B = b_new.height − 1`.
+- `p` — отправитель сообщения, сославшегося на `B` (у него `B` есть).
+
+**Ответ (sync → consensus).** Цепочка `[b_1, …, b_k]`, отдаётся одной или несколькими частями:
+- **R1 (сцепка снизу).** `parent(b_1) ∈ storage` на момент доставки.
+- **R2 (связность).** `∀ i > 1: b_i.parent = hash(b_{i−1}) ∧ b_i.height = b_{i−1}.height + 1`.
+- **R3 (верх).** Последняя часть заканчивается блоком `b_k = B`.
+- **R4 (хеши).** `hash(b_i)` вычислен локально из содержимого блока, а не взят из поля.
+- **R5 (justify).** `∀ i: b_i.justify.block = b_i.parent`.
+
+Из R1–R2 и I11: `h_exec < b_1.height`. Блоки цепочки, уже лежащие в storage, допустимы (повторный `StoreBlock` — no-op).
+
+**Разделение проверок.** sync проверяет форму: R2–R5 и сцепку с `known`. Consensus проверяет:
+- R1 на `StoreBlock`;
+- `verifyQC(b_i.justify)`;
+- правила `update`.
+Нарушение R1 — блок отбрасывается, sync повторяет запрос.
+
+**Применение (consensus).**
+1. Для `i = 1..k` по порядку выполняются `StoreBlock(b_i)` и `Update(b_i)`.
+2. `onReceiveQC` для `b_i.justify` ничего не меняет: QC из proposal, сославшегося на `B`, выше всех них и уже обработан [I1].
+3. После `B` из буфера отложенных proposal заново подаются те, у которых `parent = B`.
 
 ---
 

@@ -5,12 +5,85 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 
 SPEC_DIR = Path(__file__).resolve().parent.parent
 
-ENTRIES_FILE = Path(__file__).resolve().parent / "mutants.toml"
+ENTRIES_DIR = Path(__file__).resolve().parent / "mutants"
+INT_KEYS = {"committee_size", "max_view"}
+LIST_KEYS = {"witnesses"}
+KEYS = {"expect", "test", "byzantine", "model", "invariant", "step"} | INT_KEYS | LIST_KEYS
+
+
+def parse_diff(name: str, block: list[str]) -> list[dict]:
+    changes = []
+    for line in block:
+        if line.startswith("--- "):
+            changes.append({"file": line[4:].strip(), "lines": []})
+        elif not changes:
+            if line.strip():
+                raise RuntimeError(f"{name}: diff line before `--- file`: {line!r}")
+        elif not line:
+            changes[-1]["lines"].append((" ", ""))
+        elif line[0] in "-+ ":
+            changes[-1]["lines"].append((line[0], line[1:]))
+        else:
+            raise RuntimeError(f"{name}: diff line must start with '-', '+' or ' ': {line!r}")
+    result = []
+    for change in changes:
+        lines = change["lines"]
+        while lines and lines[-1] == (" ", ""):
+            lines.pop()
+        old = [text for prefix, text in lines if prefix != "+"]
+        new = [text for prefix, text in lines if prefix != "-"]
+        result.append({"file": change["file"], "old": "\n".join(old), "new": "\n".join(new)})
+    return result
+
+
+def parse_entry(path: Path) -> dict:
+    lines = path.read_text().split("\n")
+    if not lines[0].startswith("# "):
+        raise RuntimeError(f"{path.name}: the first line must be `# <name>`")
+    entry = {"name": lines[0][2:].strip()}
+    if entry["name"] != path.stem:
+        raise RuntimeError(f"{path.name}: name {entry['name']!r} differs from the file name")
+    i = 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    while i < len(lines) and lines[i].strip():
+        key, sep, value = lines[i].partition(": ")
+        if not sep or key not in KEYS:
+            raise RuntimeError(f"{path.name}: unknown header line {lines[i]!r}")
+        value = value.strip()
+        if key == "byzantine":
+            entry[key] = [int(v) for v in value.split(",")]
+        elif key in INT_KEYS:
+            entry[key] = int(value)
+        elif key in LIST_KEYS:
+            entry[key] = [v.strip() for v in value.split(",")]
+        else:
+            entry[key] = value
+        i += 1
+    entry["changes"] = []
+    block = None
+    for line in lines[i:]:
+        if block is None:
+            if line.strip() == "```diff":
+                block = []
+        elif line.strip() == "```":
+            entry["changes"] += parse_diff(entry["name"], block)
+            block = None
+        else:
+            block.append(line)
+    if block is not None:
+        raise RuntimeError(f"{path.name}: unclosed diff block")
+    if not entry["changes"]:
+        raise RuntimeError(f"{path.name}: no diff block")
+    return entry
+
+
+def load_entries(directory: Path) -> list[dict]:
+    return [parse_entry(path) for path in sorted(directory.glob("*.md"))]
 BYZANTINE_MODEL = "byzantine_model"
 
 
@@ -130,11 +203,10 @@ def main() -> int:
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--seed")
     parser.add_argument("--verbose", action="store_true", help="print quint output")
-    parser.add_argument("--entries", type=Path, default=ENTRIES_FILE, help="TOML file with entries")
+    parser.add_argument("--entries", type=Path, default=ENTRIES_DIR, help="directory with mutant files")
     args = parser.parse_args()
 
-    with args.entries.open("rb") as f:
-        entries = tomllib.load(f)["entry"]
+    entries = load_entries(args.entries)
     unknown = set(args.names) - {m["name"] for m in entries}
     if unknown:
         parser.error(f"unknown entries: {', '.join(sorted(unknown))}")

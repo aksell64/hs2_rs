@@ -2,6 +2,7 @@ module main {
   import types.* from "./types"
   import storage.* from "./storage"
   import driver.* from "./driver"
+  import effects.* from "./effects"
   import network.* from "./network"
   import pacemaker.* from "./pacemaker"
   import state_machine.* from "./sm"
@@ -153,15 +154,6 @@ module main {
     }
   }
 
-  action step_no_timers = {
-    nondet id = RUNNING.oneOf()
-    any {
-      apply_step(id),
-      deliver_faulty(id),
-      sync_step(id),
-    }
-  }
-
   def has_messages(id: NodeID): bool =
     nodes.get(id).queue.length() > 0 or net.inbox.get(id).length() > 0
 
@@ -247,6 +239,15 @@ module main {
       all { dice < FAULTY_PERCENT, deliver_faulty(id) },
       all { view_timer_ready_fair(id), fire_view_timer(id) },
       fire_lock_timer(id),
+      sync_step(id),
+    }
+  }
+
+  action step_happy = {
+    val candidates = RUNNING.filter(id => has_messages(id) or has_sync_requests(id))
+    nondet id = (if (candidates.size() > 0) candidates else RUNNING).oneOf()
+    any {
+      apply_step(id),
       sync_step(id),
     }
   }

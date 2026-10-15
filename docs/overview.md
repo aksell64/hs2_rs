@@ -373,7 +373,7 @@ sequenceDiagram
 
 1. Прочитать этот файл и раздел 4 ещё раз — happy path важнее всего.
 2. Открыть `docs/spec/protocol.md` и найти там обработчики из раздела 3:
-   `onReceiveProposal`, `update`, `onReceiveVote`, `advanceView`, `onTimerExpired`.
+   `upon NewProposal`, `update`, `upon NewVote`, `advanceView`, `upon ViewTimerFired`.
 3. Прогнать модель по инструкции из `docs/spec/quint/README.md` и посмотреть на
    сводку трассы: там видно, как появляются QC и коммиты, — тот же happy path, только «вживую».
 

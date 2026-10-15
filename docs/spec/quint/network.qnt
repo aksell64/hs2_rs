@@ -1,6 +1,7 @@
 module network {
   import types.* from "./types"
   import driver.* from "./driver"
+  import effects.* from "./effects"
 
   type Packet = {
     sender: NodeID,
