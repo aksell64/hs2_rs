@@ -111,6 +111,8 @@ pub trait Scheme {
     type Digest: Digest;
     type Aggregate: AggregateSignature;
 
+    fn hash(&self, bytes: &[u8]) -> Self::Digest;
+
     fn committee_size(&self) -> u32;
 
     fn sign(&self, data_hash: Self::Digest) -> Option<PartialSignature<Self::Signature>>;
@@ -198,6 +200,7 @@ impl<'a, T: Threshold, S: Scheme> CertificateCollector<'a, T, S> {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::{DefaultHasher, Hash, Hasher};
     use super::*;
     use hotstuff_types::threshold::{OneHonest, Quorum};
     use std::collections::BTreeSet;
@@ -278,6 +281,12 @@ mod tests {
         type Signature = TestShare;
         type Digest = TestDigest;
         type Aggregate = TestAggregate;
+
+        fn hash(&self, bytes: &[u8]) -> TestDigest {
+            let mut state = DefaultHasher::new();
+            bytes.hash(&mut state);
+            TestDigest((state.finish() as u32).to_be_bytes())
+        }
 
         fn committee_size(&self) -> u32 {
             self.n

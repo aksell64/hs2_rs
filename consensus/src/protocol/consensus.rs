@@ -1,29 +1,23 @@
-use crate::storage::kv::{KVError, ReadStorage, ReadWriteStorage};
+use crate::storage::{KVError, ReadStorage, ReadWriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
-use crate::types::certificate::CertifiedBlock;
+use crate::types::certificate::BlockQC;
+use crate::types::crypto::Notary;
 use crate::types::vote::Vote;
 use hotstuff_crypto::sign::Scheme;
-use std::sync::Arc;
 
-pub struct ProposeRequest<S: Scheme, C: Command> {
-    pub hash: S::Digest,
+pub struct ProposeRequest<C: Command> {
     pub cmd: C,
     pub view: View,
 }
 
-pub enum ConsensusEvent<S: Scheme, C: Command> {
+pub enum ConsensusInput<S: Scheme, C: Command> {
     ReceivedProposal(Proposal<S, C>),
-    QCProcessed(Proposal<S, C>),
     Update(Block<S, C>),
-    MakeProposal(ProposeRequest<S, C>),
+    MakeProposal(ProposeRequest<C>),
 }
 
 pub enum ConsensusOutput<S: Scheme, C: Command> {
-    ReceiveQC {
-        qc: CertifiedBlock<S>,
-        proposal: Proposal<S, C>,
-    },
     ConfirmVote {
         vote: Vote<S>,
         block: Block<S, C>,
@@ -34,42 +28,31 @@ pub enum ConsensusOutput<S: Scheme, C: Command> {
 }
 
 pub struct Consensus<S: Scheme> {
-    scheme: Arc<S>,
+    notary: Notary<S>,
 }
 
 type ConsensusResult<S, C> = Result<Option<ConsensusOutput<S, C>>, KVError>;
 
 impl<S: Scheme> Consensus<S> {
-    pub fn new(scheme: Arc<S>) -> Self {
-        Self { scheme }
+    pub fn new(notary: Notary<S>) -> Self {
+        Self { notary }
     }
 
     pub fn apply<C: Command, DB: ReadWriteStorage<S, C>>(
         &self,
         storage: &mut DB,
         cur_view: View,
-        high_qc: &CertifiedBlock<S>,
-        event: ConsensusEvent<S, C>,
+        high_qc: &BlockQC<S>,
+        event: ConsensusInput<S, C>,
     ) -> ConsensusResult<S, C> {
         match event {
-            ConsensusEvent::ReceivedProposal(proposal) => Ok(self.on_receive_proposal(proposal)),
-            ConsensusEvent::QCProcessed(proposal) => self.on_qc_processed(storage, cur_view, proposal),
-            ConsensusEvent::Update(block) => self.update(storage, block),
-            ConsensusEvent::MakeProposal(request) => self.on_propose(storage, high_qc, request),
+            ConsensusInput::ReceivedProposal(proposal) => self.on_receive_proposal(storage, cur_view, proposal),
+            ConsensusInput::Update(block) => self.update(storage, block),
+            ConsensusInput::MakeProposal(request) => self.on_propose(storage, high_qc, request),
         }
     }
 
-    fn on_receive_proposal<C: Command>(&self, proposal: Proposal<S, C>) -> Option<ConsensusOutput<S, C>> {
-        if !self.is_valid_qc(&proposal.block.justify) {
-            return None;
-        }
-        Some(ConsensusOutput::ReceiveQC {
-            qc: proposal.block.justify.clone(),
-            proposal,
-        })
-    }
-
-    fn on_qc_processed<C: Command, DB: ReadWriteStorage<S, C>>(
+    fn on_receive_proposal<C: Command, DB: ReadWriteStorage<S, C>>(
         &self,
         storage: &mut DB,
         cur_view: View,
@@ -96,7 +79,7 @@ impl<S: Scheme> Consensus<S> {
         storage: &DB,
         block: &Block<S, C>,
     ) -> Result<bool, KVError> {
-        if block.parent != block.justify.block {
+        if block.parent != block.justify.block() {
             return Ok(false);
         }
         Ok(match storage.get_block_by_hash(&block.parent)? {
@@ -113,7 +96,7 @@ impl<S: Scheme> Consensus<S> {
     ) -> Result<bool, KVError> {
         let voted_view = storage.get_voted_view()?;
         let locked_qc = storage.get_locked_qc()?;
-        if voted_view < view && block.justify.view >= locked_qc.view {
+        if voted_view < view && block.justify.view() >= locked_qc.view() {
             return Ok(true);
         }
         Ok(false)
@@ -125,19 +108,19 @@ impl<S: Scheme> Consensus<S> {
         block: Block<S, C>,
     ) -> ConsensusResult<S, C> {
         let locked_qc = storage.get_locked_qc()?;
-        if block.justify.view > locked_qc.view {
+        if block.justify.view() > locked_qc.view() {
             storage.update_locked_qc(block.justify.clone())?;
         }
-        let Some(justify_block) = storage.get_block_by_hash(&block.justify.block)? else {
+        let Some(justify_block) = storage.get_block_by_hash(&block.justify.block())? else {
             return Ok(None);
         };
-        let Some(b) = storage.get_block_by_hash(&justify_block.justify.block)? else {
+        let Some(b) = storage.get_block_by_hash(&justify_block.justify.block())? else {
             return Ok(None);
         };
 
         let exec_height = storage.get_exec_height()?;
         if justify_block.parent == b.hash
-            && block.justify.view == justify_block.justify.view + 1
+            && block.justify.view() == justify_block.justify.view() + 1
             && b.height > exec_height
         {
             let exec_hash = storage.get_exec_hash()?;
@@ -169,18 +152,21 @@ impl<S: Scheme> Consensus<S> {
     fn on_propose<C: Command, DB: ReadStorage<S, C>>(
         &self,
         storage: &DB,
-        high_qc: &CertifiedBlock<S>,
-        request: ProposeRequest<S, C>,
+        high_qc: &BlockQC<S>,
+        request: ProposeRequest<C>,
     ) -> ConsensusResult<S, C> {
-        let Some(parent) = storage.get_block_by_hash(&high_qc.block)? else {
+        let Some(parent) = storage.get_block_by_hash(&high_qc.block())? else {
             return Ok(None);
         };
+        let justify = high_qc.clone();
+        let height = parent.height + 1;
+        let hash = self.notary.block_hash(&parent.hash, &request.cmd, &justify, height);
         let block = Block {
-            hash: request.hash,
+            hash,
             parent: parent.hash,
             cmd: request.cmd,
-            justify: high_qc.clone(),
-            height: parent.height + 1,
+            justify,
+            height,
         };
         Ok(Some(ConsensusOutput::Propose(Proposal {
             block,
@@ -188,7 +174,11 @@ impl<S: Scheme> Consensus<S> {
         })))
     }
 
-    fn is_valid_qc(&self, qc: &CertifiedBlock<S>) -> bool {
-        self.scheme.verify_certificate(&qc.certificate)
+    pub(crate) fn is_valid_qc(&self, qc: &BlockQC<S>) -> bool {
+        self.notary.verify_qc(qc)
+    }
+
+    pub(crate) fn verify_block_hash<C: Command>(&self, block: &Block<S, C>) -> bool {
+        self.notary.verify_block_hash(block)
     }
 }

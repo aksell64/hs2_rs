@@ -23,6 +23,7 @@ use hotstuff_crypto::sign::{
 use hotstuff_types::node::NodeID;
 use hotstuff_types::threshold::{OneHonest, Quorum, Threshold};
 use std::collections::BTreeMap;
+use tiny_keccak::{Hasher, Sha3};
 use std::fmt::{self, Debug};
 
 /// Hash of whatever is being certified -- a block, a view, a timeout.
@@ -141,6 +142,14 @@ impl Scheme for Tbls {
     type Signature = Share;
     type Digest = Hash32;
     type Aggregate = Recovered;
+
+    fn hash(&self, bytes: &[u8]) -> Hash32 {
+        let mut out = [0u8; 32];
+        let mut sha3 = Sha3::v256();
+        sha3.update(bytes);
+        sha3.finalize(&mut out);
+        Hash32(out)
+    }
 
     fn committee_size(&self) -> u32 {
         self.n

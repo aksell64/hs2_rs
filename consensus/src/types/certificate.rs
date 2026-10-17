@@ -1,40 +1,55 @@
-use codec::{Decode, Encode};
 use crate::types::View;
-use hotstuff_crypto::sign::{Certificate, Scheme};
+use crate::types::vote::Vote;
+use codec::{Decode, Encode};
+use hotstuff_crypto::sign::{Certificate as RawCertificate, PartialSignature, Scheme};
 use hotstuff_types::threshold::Quorum;
 
-pub type QuorumCertificate<S> = Certificate<<S as Scheme>::Digest, Quorum, <S as Scheme>::Aggregate>;
+pub type BlockQC<S> = QuorumCertificate<S, Vote<S>>;
 
-pub type TimeoutCertificate<S> = Certificate<<S as Scheme>::Digest, Quorum, <S as Scheme>::Aggregate>;
+pub type TimeoutQC<S> = QuorumCertificate<S, View>;
 
 #[derive(Encode, Decode)]
-pub struct CertifiedBlock<S: Scheme> {
-    pub certificate: QuorumCertificate<S>,
-    pub block: S::Digest,
-    pub view: View,
+pub struct QuorumCertificate<S: Scheme, T> {
+    pub subject: T,
+    pub raw: RawCertificate<S::Digest, Quorum, S::Aggregate>,
 }
 
 #[derive(Encode, Decode)]
-pub struct CertifiedView<S: Scheme> {
-    pub certificate: TimeoutCertificate<S>,
-    pub view: View,
+pub struct Signature<S: Scheme, T> {
+    pub subject: T,
+    pub raw: PartialSignature<S::Signature>,
 }
 
-impl<S: Scheme> Clone for CertifiedBlock<S> {
+impl<S: Scheme> BlockQC<S> {
+    pub fn view(&self) -> View {
+        self.subject.view
+    }
+
+    pub fn block(&self) -> S::Digest {
+        self.subject.block
+    }
+}
+
+impl<S: Scheme> TimeoutQC<S> {
+    pub fn view(&self) -> View {
+        self.subject
+    }
+}
+
+impl<S: Scheme, T: Clone> Clone for QuorumCertificate<S, T> {
     fn clone(&self) -> Self {
         Self {
-            certificate: self.certificate.clone(),
-            block: self.block,
-            view: self.view,
+            subject: self.subject.clone(),
+            raw: self.raw.clone(),
         }
     }
 }
 
-impl<S: Scheme> Clone for CertifiedView<S> {
+impl<S: Scheme, T: Clone> Clone for Signature<S, T> {
     fn clone(&self) -> Self {
         Self {
-            certificate: self.certificate.clone(),
-            view: self.view,
+            subject: self.subject.clone(),
+            raw: self.raw.clone(),
         }
     }
 }

@@ -1073,6 +1073,7 @@ dependencies = [
  "hotstuff-types",
  "parity-scale-codec",
  "rand 0.8.8",
+ "tiny-keccak",
 ]
 
 [[package]]

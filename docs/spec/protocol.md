@@ -19,13 +19,13 @@ Event-driven Chained HotStuff-2 (for replica u)
 //   votedView             — последний view, в котором u голосовал
 //   curView               — текущий view
 //   proposed              — предлагал ли u уже в curView
-//   scheduled             — эпохи, для которых расписание уже построено
+//   scheduledEpoch        — последняя эпоха, для которой построено расписание (⊥ до первой)
 //   V[b, view]            — доли голосов; W[v] — доли wish
 //   M                     — отправители status текущего view, включая самого u
 //   sentWish[v], relayedTC[v] — защита от повторов
 //
 //   init: b_lock = b_exec = b0 (genesis); qc_lock = qc_high = QC(b0);
-//         votedView = 0; curView = 0;
+//         votedView = 0; curView = 0; scheduledEpoch = ⊥;
 //         старт: у всех узлов сразу срабатывает ViewTimerFired(0) → advanceView(1)
 //
 //   verifyQC(qc)              — qc несёт n−f валидных долей за ⟨qc.node, qc.viewNumber⟩
@@ -135,10 +135,11 @@ procedure setTimers(v)                                       // вход в эп
 procedure advanceView(v')
     if v' ≤ curView then return
     cancel timer case2(curView)                              // снимаем таймер покидаемого view
+    cancel timers ViewTimerFired(w) for w < v'               // таймеры пройденных views
     curView ← v'; proposed ← false
     M ← {u}                                                  // u учитывает себя
-    if epochOf(v') ∉ scheduled then                          // расписание один раз на эпоху
-        scheduled ← scheduled ∪ {epochOf(v')}
+    if scheduledEpoch = ⊥ ∨ epochOf(v') > scheduledEpoch then // расписание один раз на эпоху
+        scheduledEpoch ← epochOf(v')
         setTimers(v')
     enterView(v')
 

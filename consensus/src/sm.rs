@@ -1,55 +1,67 @@
 use crate::network::message::Envelope;
-use crate::protocol::driver::{Driver, DriverEvent, DriverOutput};
-use crate::storage::kv::{KVError, Storage};
+use crate::protocol::driver::{Driver, DriverInput, DriverOutput};
+use crate::protocol::timeouts::TimeoutPolicy;
+use crate::storage::{KVError, Storage};
 use crate::storage::staged::StagedStorage;
 use crate::timer::service::TimerCommand;
 use crate::types::block::{Block, Command};
+use crate::types::clock::{Clock, Source};
 use crate::types::mempool::Mempool;
 use hotstuff_crypto::sign::Scheme;
 use std::collections::VecDeque;
 
-pub struct Effects<S: Scheme, C: Command> {
+pub struct Effects<S: Scheme, C: Command, CL: Clock> {
     pub net: Vec<Envelope<S, C>>,
-    pub timers: Vec<TimerCommand>,
+    pub timers: Vec<TimerCommand<CL>>,
 }
 
-pub struct NodeState<S: Scheme, C: Command, DB: Storage<S, C>, M: Mempool<C>> {
-    driver: Driver<S, C>,
-    queue: VecDeque<DriverEvent<S, C>>,
+pub struct NodeState<
+    S: Scheme,
+    C: Command,
+    DB: Storage<S, C>,
+    M: Mempool<C>,
+    TP: TimeoutPolicy,
+    TS: Source<Clock = TP::Clock>,
+> {
+    driver: Driver<S, C, TP, TS>,
+    queue: VecDeque<DriverInput<S, C>>,
     db: DB,
     mempool: M,
 }
 
-impl<S: Scheme, C: Command, DB: Storage<S, C>, M: Mempool<C>> NodeState<S, C, DB, M> {
-    pub fn add_event_to_queue(&mut self, evt: DriverEvent<S, C>) {
+impl<
+    S: Scheme,
+    C: Command,
+    DB: Storage<S, C>,
+    M: Mempool<C>,
+    TP: TimeoutPolicy,
+    TS: Source<Clock = TP::Clock>,
+> NodeState<S, C, DB, M, TP, TS>
+{
+    pub fn add_event_to_queue(&mut self, evt: DriverInput<S, C>) {
         self.queue.push_back(evt);
     }
 
-    pub fn apply(&mut self) -> Result<Option<Effects<S, C>>, KVError> {
+    pub fn apply(&mut self) -> Result<Option<Effects<S, C, TP::Clock>>, KVError> {
         let Some(event) = self.queue.pop_front() else {
             return Ok(None);
         };
         let mut staged = StagedStorage::new(&self.db);
-        let result = self.driver.apply(&mut staged, event)?;
+        let result = self.driver.apply(&mut staged, &mut self.mempool, event)?;
         let batch = staged.into_batch();
         self.db.commit_write_batch(batch)?;
 
         self.process_committed_blocks(&result.committed);
 
-        let mut effects = Effects {
-            net: result.net,
-            timers: Vec::new(),
-        };
         for out in result.out {
             match out {
-                DriverOutput::NewView(view) => self.queue.push_front(DriverEvent::EnterView(view)),
                 DriverOutput::Replay(replay) => self.queue.push_front(replay),
-                DriverOutput::SetViewTimer(view) => effects.timers.push(TimerCommand::StartView(view)),
-                DriverOutput::SetLockTimer(view) => effects.timers.push(TimerCommand::StartLock(view)),
-                DriverOutput::ClearLockTimer(view) => effects.timers.push(TimerCommand::StopLock(view)),
             }
         }
-        Ok(Some(effects))
+        Ok(Some(Effects {
+            net: result.net,
+            timers: result.timers,
+        }))
     }
 
     fn process_committed_blocks(&mut self, committed: &[Block<S, C>]) {

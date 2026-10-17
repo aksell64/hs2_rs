@@ -1,7 +1,7 @@
-use crate::storage::kv::{KVError, ReadStorage, Storage, WriteStorage};
+use crate::storage::{KVError, ReadStorage, Storage, WriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command};
-use crate::types::certificate::CertifiedBlock;
+use crate::types::certificate::BlockQC;
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
 use std::collections::HashMap;
@@ -10,8 +10,8 @@ pub struct StagedStorage<'a, S: Scheme, C: Command, DB: Storage<S, C>> {
     storage: &'a DB,
     batch: DB::WriteBatch,
     blocks: HashMap<S::Digest, Block<S, C>>,
-    high_qc: Option<CertifiedBlock<S>>,
-    locked_qc: Option<CertifiedBlock<S>>,
+    high_qc: Option<BlockQC<S>>,
+    locked_qc: Option<BlockQC<S>>,
     voted_view: Option<View>,
     exec_height: Option<u64>,
     exec_hash: Option<S::Digest>,
@@ -50,18 +50,18 @@ impl<S: Scheme, C: Command, DB: Storage<S, C>> ReadStorage<S, C> for StagedStora
         }
     }
 
-    fn get_cert_by_view(&self, view: View) -> Result<Option<CertifiedBlock<S>>, KVError> {
+    fn get_cert_by_view(&self, view: View) -> Result<Option<BlockQC<S>>, KVError> {
         self.storage.get_cert_by_view(view)
     }
 
-    fn get_high_qc(&self) -> Result<CertifiedBlock<S>, KVError> {
+    fn get_high_qc(&self) -> Result<BlockQC<S>, KVError> {
         match &self.high_qc {
             Some(qc) => Ok(qc.clone()),
             None => self.storage.get_high_qc(),
         }
     }
 
-    fn get_locked_qc(&self) -> Result<CertifiedBlock<S>, KVError> {
+    fn get_locked_qc(&self) -> Result<BlockQC<S>, KVError> {
         match &self.locked_qc {
             Some(qc) => Ok(qc.clone()),
             None => self.storage.get_locked_qc(),
@@ -122,12 +122,12 @@ impl<S: Scheme, C: Command, DB: Storage<S, C>> WriteStorage<S, C> for StagedStor
         self.batch.commit_block(block)
     }
 
-    fn update_high_qc(&mut self, qc: CertifiedBlock<S>) -> Result<(), KVError> {
+    fn update_high_qc(&mut self, qc: BlockQC<S>) -> Result<(), KVError> {
         self.high_qc = Some(qc.clone());
         self.batch.update_high_qc(qc)
     }
 
-    fn update_locked_qc(&mut self, qc: CertifiedBlock<S>) -> Result<(), KVError> {
+    fn update_locked_qc(&mut self, qc: BlockQC<S>) -> Result<(), KVError> {
         self.locked_qc = Some(qc.clone());
         self.batch.update_locked_qc(qc)
     }

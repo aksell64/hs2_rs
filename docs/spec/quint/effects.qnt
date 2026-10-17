@@ -21,6 +21,7 @@ module effects {
   | SetViewTimer(View)
   | SetLockTimer(View)
   | ClearLockTimer(View)
+  | ClearViewTimersBelow(View)
 
   type Effect =
   | Send(Envelope)

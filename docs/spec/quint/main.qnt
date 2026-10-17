@@ -48,7 +48,7 @@ module main {
       driver: init_driver(id, GENESIS, GENESIS_QC),
       kv: insert_block(empty_storage, GENESIS),
       queue: [ViewTimerFired(0)],
-      view_timer: None,
+      view_timers: Set(),
       lock_timer: None,
     }
 
@@ -104,15 +104,19 @@ module main {
       | None => -1
     }
 
+  pure def next_view_timer(timers: Set[View]): View =
+    timers.fold(-1, (m, w) => if (m == -1 or w < m) w else m)
+
   // The lock timer (P_pc + Δ) is shorter than the view slot (τ), so a leader waiting
   // in Case 2 always gets to propose before its view times out. Without clocks this
   // order is lost; the guard below restores it.
   action fire_view_timer(id: NodeID): bool =
     val node = nodes.get(id)
+    val v = next_view_timer(node.view_timers)
     all {
-      node.view_timer != None,
+      node.view_timers.size() > 0,
       node.lock_timer == None,
-      enqueue_timer(id, node.with("view_timer", None), ViewTimerFired(armed_view(node.view_timer))),
+      enqueue_timer(id, node.with("view_timers", node.view_timers.exclude(Set(v))), ViewTimerFired(v)),
     }
 
   action fire_lock_timer(id: NodeID): bool =
@@ -161,7 +165,7 @@ module main {
     syncs.get(id).requested.size() > 0
 
   def has_armed_timer(id: NodeID): bool =
-    nodes.get(id).view_timer != None or nodes.get(id).lock_timer != None
+    nodes.get(id).view_timers.size() > 0 or nodes.get(id).lock_timer != None
 
   def actors(dice: int): Set[NodeID] =
     RUNNING.filter(id => or {
@@ -207,7 +211,7 @@ module main {
     val node = nodes.get(id)
     and {
       // The node is in some view v and its slot for v is running.
-      node.view_timer != None,
+      node.view_timers.size() > 0,
       // No Case 2 wait is in progress: a leader waiting for statuses proposes before its
       // view timer may fire (stands for the lock timer P_pc + Δ being shorter than τ).
       node.lock_timer == None,
@@ -218,7 +222,7 @@ module main {
       // sending happen in one step, so a proposal of a correct leader is by now in this
       // node's inbox, queue, pending buffer or already processed. A faulty leader counts as
       // done: correct nodes must be able to time out on it.
-      leader_finished(armed_view(node.view_timer)),
+      leader_finished(next_view_timer(node.view_timers)),
     }
 
   def actors_fair(dice: int): Set[NodeID] =

@@ -1,21 +1,25 @@
 use crate::network::message::{Envelope, Message, Recipient};
-use crate::protocol::collector::CollectorEvent::GenericVoteInput;
+use crate::protocol::collector::CollectorInput::GenericVoteInput;
 use crate::protocol::collector::{
-    Collector, CollectorEvent, CollectorOutput, GenericCollectorOutput, TimeoutCollectorOutput,
+    Collector, CollectorInput, CollectorOutput, GenericCollectorOutput, TimeoutCollectorOutput,
 };
-use crate::protocol::consensus::ConsensusEvent::ReceivedProposal;
-use crate::protocol::consensus::{Consensus, ConsensusEvent, ConsensusOutput, ProposeRequest};
-use crate::protocol::pacemaker::{Pacemaker, PacemakerEvent, PacemakerOutput};
-use crate::storage::kv::{KVError, ReadWriteStorage};
+use crate::protocol::consensus::{Consensus, ConsensusInput, ConsensusOutput, ProposeRequest};
+use crate::protocol::effects::Effect;
+use crate::protocol::pacemaker::{Pacemaker, PacemakerInput, PacemakerOutput, Status};
+use crate::protocol::timeouts::TimeoutPolicy;
+use crate::storage::{KVError, ReadWriteStorage};
+use crate::timer::service::TimerCommand;
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
-use crate::types::certificate::{CertifiedBlock, CertifiedView};
+use crate::types::certificate::TimeoutQC;
+use crate::types::clock::{Clock, Source};
+use crate::types::mempool::Mempool;
 use crate::types::vote::Vote;
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
 use std::collections::BTreeMap;
 
-pub enum DriverEvent<S: Scheme, C: Command> {
+pub enum DriverInput<S: Scheme, C: Command> {
     NewProposal {
         sender: NodeID,
         proposal: Proposal<S, C>,
@@ -28,45 +32,36 @@ pub enum DriverEvent<S: Scheme, C: Command> {
         sender: NodeID,
         view: View,
     },
-    NewStatus {
-        sender: NodeID,
-        qc: CertifiedBlock<S>,
-        view: View,
-    },
-    NewTC(CertifiedView<S>),
+    NewStatus(Status<S>),
+    NewTC(TimeoutQC<S>),
     ViewTimerFired(View),
     LockTimerFired(View),
-    EnterView(View),
     BlockSynced(Block<S, C>),
 }
 
 pub enum DriverOutput<S: Scheme, C: Command> {
-    NewView(View),
-    SetViewTimer(View),
-    SetLockTimer(View),
-    ClearLockTimer(View),
-    Replay(DriverEvent<S, C>),
+    Replay(DriverInput<S, C>),
 }
 
-pub struct DriverResult<S: Scheme, C: Command> {
+pub struct DriverResult<S: Scheme, C: Command, CL: Clock> {
     pub net: Vec<Envelope<S, C>>,
+    pub timers: Vec<TimerCommand<CL>>,
     pub out: Vec<DriverOutput<S, C>>,
     pub committed: Vec<Block<S, C>>,
 }
 
 enum Task<S: Scheme, C: Command> {
-    Pacemaker(PacemakerEvent<S>),
-    Consensus(ConsensusEvent<S, C>),
-    Collector(CollectorEvent<S>),
+    Pacemaker(PacemakerInput<S>),
+    Consensus(ConsensusInput<S, C>),
+    Collector(CollectorInput<S>),
     StoreBlock(Block<S, C>),
     Commit(Vec<Block<S, C>>),
     ProposalOrBuffer(Proposal<S, C>),
-    ReleasePending(View),
     Send(Envelope<S, C>),
 }
 
 enum TaskOut<S: Scheme, C: Command> {
-    Pacemaker(PacemakerOutput<S>),
+    Pacemaker(PacemakerOutput),
     Consensus(ConsensusOutput<S, C>),
     Collector(CollectorOutput<S>),
 }
@@ -90,94 +85,94 @@ impl<S: Scheme, C: Command> TasksStack<S, C> {
     }
 }
 
-pub struct Driver<S: Scheme, C: Command> {
+pub struct Driver<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> {
     consensus: Consensus<S>,
-    pacemaker: Pacemaker<S>,
+    pacemaker: Pacemaker<S, TP, TS>,
     collector: Collector<S>,
     pending: BTreeMap<View, Vec<(NodeID, Proposal<S, C>)>>,
 }
 
-impl<S: Scheme, C: Command> Driver<S, C> {
-    pub fn apply<DB: ReadWriteStorage<S, C>>(
+impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Driver<S, C, TP, TS> {
+    pub fn apply<DB: ReadWriteStorage<S, C>, M: Mempool<C>>(
         &mut self,
         storage: &mut DB,
-        evt: DriverEvent<S, C>,
-    ) -> Result<DriverResult<S, C>, KVError> {
+        mempool: &mut M,
+        evt: DriverInput<S, C>,
+    ) -> Result<DriverResult<S, C, TP::Clock>, KVError> {
         let stack = self.prepare_tasks_from_event(evt);
-        self.apply_nested(storage, stack)
+        self.apply_nested(storage, mempool, stack)
     }
 
-    fn prepare_tasks_from_event(&mut self, event: DriverEvent<S, C>) -> TasksStack<S, C> {
+    fn prepare_tasks_from_event(&mut self, event: DriverInput<S, C>) -> TasksStack<S, C> {
         let mut stack = TasksStack::new();
         let tasks = self.tasks_from_event(event);
         stack.push(tasks);
         stack
     }
 
-    fn tasks_from_event(&self, event: DriverEvent<S, C>) -> Vec<Task<S, C>> {
+    fn tasks_from_event(&self, event: DriverInput<S, C>) -> Vec<Task<S, C>> {
         match event {
-            DriverEvent::NewProposal { sender, proposal } => {
-                let proposed_view_leader = self.pacemaker.leader(proposal.view);
-                if sender != proposed_view_leader {
+            DriverInput::NewProposal { sender, proposal } => {
+                if sender != self.pacemaker.leader(proposal.view)
+                    || !self.consensus.is_valid_qc(&proposal.block.justify)
+                    || !self.consensus.verify_block_hash(&proposal.block)
+                {
                     return vec![];
                 }
-                vec![Task::Consensus(ReceivedProposal(proposal))]
+                let justify = proposal.block.justify.clone();
+                vec![
+                    Task::Pacemaker(PacemakerInput::ReceivedQC(justify)),
+                    Task::ProposalOrBuffer(proposal),
+                ]
             }
 
-            DriverEvent::NewVote { sender, vote } => {
+            DriverInput::NewVote { sender, vote } => {
                 if !self.pacemaker.is_leader(vote.view + 1) {
                     return vec![];
                 }
                 vec![Task::Collector(GenericVoteInput { sender, vote })]
             }
 
-            DriverEvent::NewWish { sender, view } => {
-                vec![Task::Pacemaker(PacemakerEvent::ReceiveWish {
-                    sender,
-                    view,
-                })]
+            DriverInput::NewWish { sender, view } => {
+                if !self.pacemaker.is_epoch_leader(view) {
+                    return vec![];
+                }
+                vec![Task::Collector(CollectorInput::WishInput { sender, view })]
             }
 
-            DriverEvent::NewStatus { sender, qc, view } => {
-                vec![Task::Pacemaker(PacemakerEvent::ReceiveStatus {
-                    sender,
-                    qc,
-                    view,
-                })]
+            DriverInput::NewStatus(status) => {
+                vec![Task::Pacemaker(PacemakerInput::ReceivedStatus(status))]
             }
 
-            DriverEvent::NewTC(tc) => vec![Task::Pacemaker(PacemakerEvent::TimeoutQC(tc))],
+            DriverInput::NewTC(tc) => vec![Task::Pacemaker(PacemakerInput::ReceivedTC(tc))],
 
-            DriverEvent::ViewTimerFired(view) => {
-                vec![Task::Pacemaker(PacemakerEvent::TimerExpiredView(view))]
+            DriverInput::ViewTimerFired(view) => {
+                vec![Task::Pacemaker(PacemakerInput::ViewTimerExpired(view))]
             }
 
-            DriverEvent::LockTimerFired(view) => {
-                vec![Task::Pacemaker(PacemakerEvent::LockTimerExpired(view))]
+            DriverInput::LockTimerFired(view) => {
+                vec![Task::Pacemaker(PacemakerInput::LockTimerExpired(view))]
             }
 
-            DriverEvent::EnterView(view) => vec![
-                Task::Pacemaker(PacemakerEvent::EnterViewRequested(view)),
-                Task::ReleasePending(view),
-            ],
-
-            DriverEvent::BlockSynced(_) => vec![],
+            DriverInput::BlockSynced(_) => vec![],
         }
     }
 
-    fn apply_nested<DB: ReadWriteStorage<S, C>>(
+    fn apply_nested<DB: ReadWriteStorage<S, C>, M: Mempool<C>>(
         &mut self,
         storage: &mut DB,
+        mempool: &mut M,
         mut stack: TasksStack<S, C>,
-    ) -> Result<DriverResult<S, C>, KVError> {
+    ) -> Result<DriverResult<S, C, TP::Clock>, KVError> {
         let mut result = DriverResult {
             net: Vec::new(),
+            timers: Vec::new(),
             out: Vec::new(),
             committed: Vec::new(),
         };
         while let Some(task) = stack.pop() {
             if let Some(out) = self.process_input(storage, task, &mut result)? {
-                stack.push(self.process_out(out, &mut result));
+                stack.push(self.process_out(mempool, out, &mut result));
             }
         }
         Ok(result)
@@ -187,10 +182,27 @@ impl<S: Scheme, C: Command> Driver<S, C> {
         &mut self,
         storage: &mut DB,
         task: Task<S, C>,
-        result: &mut DriverResult<S, C>,
+        result: &mut DriverResult<S, C, TP::Clock>,
     ) -> Result<Option<TaskOut<S, C>>, KVError> {
         match task {
-            Task::Pacemaker(evt) => Ok(self.pacemaker.apply(storage, evt)?.map(TaskOut::Pacemaker)),
+            Task::Pacemaker(evt) => {
+                let old_view = storage.get_cur_view()?;
+                let called = self.pacemaker.apply(storage, evt)?;
+                for effect in called.effects {
+                    match effect {
+                        Effect::Send(envelope) => result.net.push(envelope),
+                        Effect::Timer(command) => result.timers.push(command),
+                    }
+                }
+                let new_view = storage.get_cur_view()?;
+                if new_view > old_view {
+                    self.release_pending(new_view, result);
+                }
+                match called.out {
+                    PacemakerOutput::NoPacemakerOutput => Ok(None),
+                    out => Ok(Some(TaskOut::Pacemaker(out))),
+                }
+            }
             Task::Consensus(evt) => {
                 let cur_view = storage.get_cur_view()?;
                 let high_qc = storage.get_high_qc()?;
@@ -212,15 +224,6 @@ impl<S: Scheme, C: Command> Driver<S, C> {
                 Ok(None)
             }
             Task::ProposalOrBuffer(proposal) => Ok(None),
-            Task::ReleasePending(view) => {
-                let released = self.pending.remove(&view).unwrap_or_default();
-                result
-                    .out
-                    .extend(released.into_iter().map(|(sender, proposal)| {
-                        DriverOutput::Replay(DriverEvent::NewProposal { sender, proposal })
-                    }));
-                Ok(None)
-            }
             Task::Send(envelope) => {
                 result.net.push(envelope);
                 Ok(None)
@@ -228,105 +231,54 @@ impl<S: Scheme, C: Command> Driver<S, C> {
         }
     }
 
-    fn process_out(
+    fn process_out<M: Mempool<C>>(
         &mut self,
+        mempool: &mut M,
         output: TaskOut<S, C>,
-        result: &mut DriverResult<S, C>,
+        result: &mut DriverResult<S, C, TP::Clock>,
     ) -> Vec<Task<S, C>> {
         match output {
-            TaskOut::Pacemaker(out) => self.process_pacemaker_out(out, result),
+            TaskOut::Pacemaker(out) => self.process_pacemaker_out(mempool, out, result),
             TaskOut::Consensus(out) => self.process_consensus_out(out, result),
             TaskOut::Collector(out) => self.process_collector_out(out, result),
         }
     }
 
-    fn process_pacemaker_out(
+    fn release_pending(&mut self, view: View, result: &mut DriverResult<S, C, TP::Clock>) {
+        let released = self.pending.remove(&view).unwrap_or_default();
+        result
+            .out
+            .extend(released.into_iter().map(|(sender, proposal)| {
+                DriverOutput::Replay(DriverInput::NewProposal { sender, proposal })
+            }));
+    }
+
+    fn process_pacemaker_out<M: Mempool<C>>(
         &mut self,
-        pacemaker_out: PacemakerOutput<S>,
-        result: &mut DriverResult<S, C>,
+        mempool: &mut M,
+        pacemaker_out: PacemakerOutput,
+        _: &mut DriverResult<S, C, TP::Clock>,
     ) -> Vec<Task<S, C>> {
         match pacemaker_out {
-            PacemakerOutput::HighQCUpdated(qc) => {
-                vec![Task::Pacemaker(PacemakerEvent::HighQCApplied(qc))]
-            }
-            PacemakerOutput::AdvanceView(view) => {
-                vec![Task::Pacemaker(PacemakerEvent::AdvanceViewRequested(view))]
-            }
-            PacemakerOutput::CancelLockTimer { view, next } => {
-                result.out.push(DriverOutput::ClearLockTimer(view));
-                vec![Task::Pacemaker(PacemakerEvent::LockTimerCanceled(next))]
-            }
-            PacemakerOutput::StartTimerView(view) => {
-                result.out.push(DriverOutput::SetViewTimer(view));
-                vec![Task::Pacemaker(PacemakerEvent::ViewTimerStarted(view))]
-            }
-            PacemakerOutput::EnterNewView(view) => {
-                result.out.push(DriverOutput::NewView(view));
-                vec![]
-            }
-            PacemakerOutput::StartLockTimer(view) => {
-                result.out.push(DriverOutput::SetLockTimer(view));
-                vec![]
-            }
             PacemakerOutput::ProposeNow(view) => {
-                vec![Task::Consensus(ConsensusEvent::MakeProposal(
-                    self.propose_request(view),
-                ))]
+                let request = Self::propose_request(mempool, view);
+                vec![Task::Consensus(ConsensusInput::MakeProposal(request))]
             }
-            PacemakerOutput::SendStatus { to, qc, view } => vec![Task::Send(Envelope {
-                to: Recipient::Node(to),
-                msg: Message::StatusMsg { qc, view },
-            })],
-            PacemakerOutput::SendWish { to, view } => to
-                .into_iter()
-                .map(|node| {
-                    Task::Send(Envelope {
-                        to: Recipient::Node(node),
-                        msg: Message::WishMsg(view),
-                    })
-                })
-                .collect(),
-            PacemakerOutput::ReceiveWishIsLeader { sender, view } => {
-                vec![Task::Collector(CollectorEvent::WishInput { sender, view })]
-            }
-            PacemakerOutput::BroadcastTC(tc) => vec![
-                Task::Pacemaker(PacemakerEvent::AdvanceViewRequested(tc.view)),
-                Task::Send(Envelope {
-                    to: Recipient::All,
-                    msg: Message::TCMsg(tc),
-                }),
-            ],
-            PacemakerOutput::SendTCToLeader { to, tc } => {
-                let advance = Task::Pacemaker(PacemakerEvent::AdvanceViewRequested(tc.view));
-                let relays = to.into_iter().map(|node| {
-                    Task::Send(Envelope {
-                        to: Recipient::Node(node),
-                        msg: Message::TCMsg(tc.clone()),
-                    })
-                });
-                std::iter::once(advance).chain(relays).collect()
-            }
-            PacemakerOutput::StatusIsLeader { qc, .. } => {
-                vec![Task::Pacemaker(PacemakerEvent::ProcessQC(qc))]
-            }
+            PacemakerOutput::NoPacemakerOutput => vec![],
         }
     }
 
     fn process_consensus_out(
         &mut self,
         consensus_out: ConsensusOutput<S, C>,
-        _: &mut DriverResult<S, C>,
+        _: &mut DriverResult<S, C, TP::Clock>,
     ) -> Vec<Task<S, C>> {
         match consensus_out {
-            ConsensusOutput::ReceiveQC { qc, proposal } => vec![
-                Task::Pacemaker(PacemakerEvent::ProcessQC(qc)),
-                Task::ProposalOrBuffer(proposal),
-            ],
             ConsensusOutput::ConfirmVote { vote, block } => {
                 let leader = self.pacemaker.leader(vote.view + 1);
                 vec![
                     Task::StoreBlock(block.clone()),
-                    Task::Consensus(ConsensusEvent::Update(block)),
+                    Task::Consensus(ConsensusInput::Update(block)),
                     Task::Send(Envelope {
                         to: Recipient::Node(leader),
                         msg: Message::VoteMsg(vote),
@@ -335,7 +287,7 @@ impl<S: Scheme, C: Command> Driver<S, C> {
             }
             ConsensusOutput::RejectVote(block) => vec![
                 Task::StoreBlock(block.clone()),
-                Task::Consensus(ConsensusEvent::Update(block)),
+                Task::Consensus(ConsensusInput::Update(block)),
             ],
             ConsensusOutput::Commit(blocks) => vec![Task::Commit(blocks)],
             ConsensusOutput::Propose(proposal) => vec![Task::Send(Envelope {
@@ -348,11 +300,11 @@ impl<S: Scheme, C: Command> Driver<S, C> {
     fn process_collector_out(
         &mut self,
         collector_out: CollectorOutput<S>,
-        _: &mut DriverResult<S, C>,
+        _: &mut DriverResult<S, C, TP::Clock>,
     ) -> Vec<Task<S, C>> {
         match collector_out {
             CollectorOutput::GenericOutput(GenericCollectorOutput::Ready(qc)) => {
-                vec![Task::Pacemaker(PacemakerEvent::ProcessQC(qc))]
+                vec![Task::Pacemaker(PacemakerInput::ReceivedQC(qc))]
             }
             CollectorOutput::GenericOutput(
                 GenericCollectorOutput::AlreadyReady(_) | GenericCollectorOutput::NotReady,
@@ -360,7 +312,7 @@ impl<S: Scheme, C: Command> Driver<S, C> {
                 vec![]
             }
             CollectorOutput::TimeoutOutput(TimeoutCollectorOutput::TimeoutReady(tc)) => {
-                vec![Task::Pacemaker(PacemakerEvent::TimeoutQC(tc))]
+                vec![Task::Pacemaker(PacemakerInput::ReceivedTC(tc))]
             }
             CollectorOutput::TimeoutOutput(
                 TimeoutCollectorOutput::TimeoutAlreadyReady(_)
@@ -369,7 +321,10 @@ impl<S: Scheme, C: Command> Driver<S, C> {
         }
     }
 
-    fn propose_request(&mut self, view: View) -> ProposeRequest<S, C> {
-        todo!()
+    fn propose_request<M: Mempool<C>>(mempool: &mut M, view: View) -> ProposeRequest<C> {
+        ProposeRequest {
+            cmd: mempool.next_command(),
+            view,
+        }
     }
 }

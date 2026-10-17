@@ -22,6 +22,7 @@ module pacemaker {
     statuses: Set[NodeID],
     sent_wish: Set[View],
     relayed_tc: Set[View],
+    scheduled_epoch: Option[int],
   }
 
   type PacemakerResult = {
@@ -40,6 +41,7 @@ module pacemaker {
       statuses: Set(id),
       sent_wish: Set(),
       relayed_tc: Set(),
+      scheduled_epoch: None,
     }
 
   pure def leader(view: View): NodeID = view % committee_size
@@ -56,6 +58,18 @@ module pacemaker {
 
   pure def epoch_leaders(view: View): Set[NodeID] =
     0.to(epoch_length - 1).map(k => leader(view - view % epoch_length + k))
+
+  pure def epoch_of(view: View): int = view / epoch_length
+
+  pure def is_new_epoch(pcm: Pacemaker, epoch: int): bool =
+    match pcm.scheduled_epoch {
+      | Some(e) => epoch > e
+      | None => true
+    }
+
+  pure def epoch_timers(v: View): List[Effect] =
+    val end = v - v % epoch_length + epoch_length
+    range(v, end).foldl([], (acc, w) => acc.append(Timer(SetViewTimer(w))))
 
   pure def apply_pacemaker(pcm: Pacemaker, input: PacemakerInput): PacemakerResult =
     match input {
@@ -86,13 +100,16 @@ module pacemaker {
     if (v <= pcm.cur_view)
       pacemaker_no_change(pcm)
     else
+      val epoch = epoch_of(v)
+      val schedule = if (is_new_epoch(pcm, epoch)) epoch_timers(v) else []
       val moved = pcm
         .with("cur_view", v)
         .with("cur_leader", leader(v))
         .with("proposed", false)
         .with("statuses", Set(pcm.id))
+        .with("scheduled_epoch", Some(epoch))
       val entered = enter_view(moved, v)
-      val timers = [Timer(ClearLockTimer(pcm.cur_view)), Timer(SetViewTimer(v))]
+      val timers = [Timer(ClearLockTimer(pcm.cur_view)), Timer(ClearViewTimersBelow(v))].concat(schedule)
       with_effects(timers, entered)
 
   pure def enter_view(pcm: Pacemaker, v: View): PacemakerResult =

@@ -1,6 +1,8 @@
 use crate::types::View;
 use crate::types::block::{Block, Command};
-use crate::types::certificate::CertifiedBlock;
+use crate::types::certificate::{BlockQC, QuorumCertificate};
+use crate::types::crypto::Subject;
+use crate::types::vote::Vote;
 use codec::{Decode, Encode};
 use hotstuff_crypto::sign::{
     AggregateSignature, AssemblyError, CertificateCollector, Digest, PartialSignature, Scheme,
@@ -9,6 +11,7 @@ use hotstuff_crypto::sign::{
 use hotstuff_types::node::NodeID;
 use hotstuff_types::threshold::{Quorum, Threshold};
 use std::collections::BTreeSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Encode, Decode)]
 pub struct TestDigest(pub [u8; 4]);
@@ -42,6 +45,12 @@ impl Scheme for TestScheme {
     type Signature = TestSignature;
     type Digest = TestDigest;
     type Aggregate = TestAggregate;
+
+    fn hash(&self, bytes: &[u8]) -> TestDigest {
+        let mut state = DefaultHasher::new();
+        bytes.hash(&mut state);
+        TestDigest((state.finish() as u32).to_be_bytes())
+    }
 
     fn committee_size(&self) -> u32 {
         self.n
@@ -79,26 +88,23 @@ pub fn digest(n: u32) -> TestDigest {
     TestDigest(n.to_be_bytes())
 }
 
-pub fn qc(scheme: &TestScheme, view: View, block: TestDigest) -> CertifiedBlock<TestScheme> {
-    let mut collector = CertificateCollector::<Quorum, _>::new(scheme, block);
-    let certificate = (0..scheme.n)
+pub fn qc(scheme: &TestScheme, view: View, block: TestDigest) -> BlockQC<TestScheme> {
+    let subject = Vote { view, block };
+    let mut collector = CertificateCollector::<Quorum, _>::new(scheme, subject.digest(scheme));
+    let raw = (0..scheme.n)
         .find_map(|i| {
             collector
                 .add_partial(PartialSignature::new(NodeID::from(i), TestSignature))
                 .unwrap()
         })
         .unwrap();
-    CertifiedBlock {
-        certificate,
-        block,
-        view,
-    }
+    QuorumCertificate { subject, raw }
 }
 
 pub fn block(
     hash: TestDigest,
     parent: TestDigest,
-    justify: CertifiedBlock<TestScheme>,
+    justify: BlockQC<TestScheme>,
     height: u64,
 ) -> Block<TestScheme, TestCommand> {
     Block {

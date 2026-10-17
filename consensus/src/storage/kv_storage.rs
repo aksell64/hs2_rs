@@ -1,7 +1,8 @@
-use crate::storage::kv::{KV, KVBatch, KVError, ReadStorage, Storage, WriteStorage};
+use crate::storage::kv::{KV, KVBatch};
+use crate::storage::{KVError, ReadStorage, Storage, WriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command};
-use crate::types::certificate::CertifiedBlock;
+use crate::types::certificate::BlockQC;
 use codec::{Decode, DecodeAll, Encode};
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
@@ -58,15 +59,15 @@ where
         self.get(key(BLOCK, hash.as_ref()))
     }
 
-    fn get_cert_by_view(&self, view: View) -> Result<Option<CertifiedBlock<S>>, KVError> {
+    fn get_cert_by_view(&self, view: View) -> Result<Option<BlockQC<S>>, KVError> {
         self.get(key(CERT, &view.to_be_bytes()))
     }
 
-    fn get_high_qc(&self) -> Result<CertifiedBlock<S>, KVError> {
+    fn get_high_qc(&self) -> Result<BlockQC<S>, KVError> {
         self.get_or_missing(key(HIGH_QC, &[]))
     }
 
-    fn get_locked_qc(&self) -> Result<CertifiedBlock<S>, KVError> {
+    fn get_locked_qc(&self) -> Result<BlockQC<S>, KVError> {
         self.get_or_missing(key(LOCKED_QC, &[]))
     }
 
@@ -135,11 +136,11 @@ where
         self.put(key(COMMITTED, &block.height.to_be_bytes()), block.hash)
     }
 
-    fn update_high_qc(&mut self, qc: CertifiedBlock<S>) -> Result<(), KVError> {
+    fn update_high_qc(&mut self, qc: BlockQC<S>) -> Result<(), KVError> {
         self.put(key(HIGH_QC, &[]), qc)
     }
 
-    fn update_locked_qc(&mut self, qc: CertifiedBlock<S>) -> Result<(), KVError> {
+    fn update_locked_qc(&mut self, qc: BlockQC<S>) -> Result<(), KVError> {
         self.put(key(LOCKED_QC, &[]), qc)
     }
 
@@ -201,8 +202,8 @@ mod tests {
     fn genesis_state_round_trips() {
         let (_, store) = genesis_store();
         let read: &dyn ReadStorage<TestScheme, TestCommand> = &store;
-        assert_eq!(read.get_high_qc().unwrap().view, 0);
-        assert_eq!(read.get_locked_qc().unwrap().block, digest(0));
+        assert_eq!(read.get_high_qc().unwrap().view(), 0);
+        assert_eq!(read.get_locked_qc().unwrap().block(), digest(0));
         assert_eq!(read.get_voted_view().unwrap(), 0);
         assert_eq!(read.get_exec_height().unwrap(), 0);
         assert_eq!(read.get_exec_hash().unwrap(), digest(0));
@@ -230,7 +231,7 @@ mod tests {
         assert_eq!(stored.parent, digest(0));
         assert_eq!(stored.cmd, TestCommand(1));
         assert_eq!(read.get_voted_view().unwrap(), 1);
-        assert_eq!(read.get_locked_qc().unwrap().view, 1);
+        assert_eq!(read.get_locked_qc().unwrap().view(), 1);
     }
 
     #[test]
