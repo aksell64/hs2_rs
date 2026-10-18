@@ -16,3 +16,9 @@ impl<S: Scheme> Clone for Vote<S> {
         }
     }
 }
+
+impl<S: Scheme> PartialEq for Vote<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.view == other.view && self.block == other.block
+    }
+}

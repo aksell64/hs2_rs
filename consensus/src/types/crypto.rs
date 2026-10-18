@@ -1,12 +1,12 @@
-use crate::types::View;
 use crate::types::block::{Block, Command};
 use crate::types::certificate::{BlockQC, QuorumCertificate, Signature};
 use crate::types::vote::Vote;
 use codec::Encode;
-use hotstuff_crypto::sign::Scheme;
+use hotstuff_crypto::sign::Certificate as RawCertificate;
+use hotstuff_crypto::sign::{AssemblyError, PartialSignature, Scheme};
 use std::sync::Arc;
 
-pub trait Subject: Encode {
+pub trait Signable: Encode {
     const TAG: u8;
 
     fn digest<S: Scheme>(&self, scheme: &S) -> S::Digest {
@@ -16,12 +16,8 @@ pub trait Subject: Encode {
     }
 }
 
-impl<S: Scheme> Subject for Vote<S> {
+impl<S: Scheme> Signable for Vote<S> {
     const TAG: u8 = 0;
-}
-
-impl Subject for View {
-    const TAG: u8 = 1;
 }
 
 pub struct Notary<S: Scheme> {
@@ -45,23 +41,36 @@ impl<S: Scheme> Notary<S> {
         self.scheme.committee_size()
     }
 
-    pub fn sign<T: Subject>(&self, subject: T) -> Option<Signature<S, T>> {
+    pub fn sign<T: Signable>(&self, subject: T) -> Option<Signature<S, T>> {
         let raw = self.scheme.sign(subject.digest(&*self.scheme))?;
         Some(Signature { subject, raw })
     }
 
-    pub fn verify_qc<T: Subject>(&self, qc: &QuorumCertificate<S, T>) -> bool {
+    pub fn verify_qc<T: Signable>(&self, qc: &QuorumCertificate<S, T>) -> bool {
         qc.raw.data_hash() == qc.subject.digest(&*self.scheme)
             && self.scheme.verify_certificate(&qc.raw)
     }
 
-    pub fn verify_partial<T: Subject>(&self, partial: &Signature<S, T>) -> bool {
+    pub fn verify_partial<T: Signable>(&self, partial: &Signature<S, T>) -> bool {
         self.scheme
             .verify_partial(partial.subject.digest(&*self.scheme), &partial.raw)
     }
 
     pub fn verify_block_hash<C: Command>(&self, block: &Block<S, C>) -> bool {
         block.hash == self.block_hash(&block.parent, &block.cmd, &block.justify, block.height)
+    }
+
+    pub fn aggregate<T: Signable>(
+        &self,
+        subject: T,
+        partials: impl Iterator<Item = PartialSignature<S::Signature>>,
+    ) -> Result<QuorumCertificate<S, T>, AssemblyError> {
+        let data_hash = subject.digest(&*self.scheme);
+        let aggregate = self.scheme.aggregate(data_hash, partials)?;
+        Ok(QuorumCertificate {
+            subject,
+            raw: RawCertificate::new(data_hash, aggregate),
+        })
     }
 
     pub fn block_hash<C: Command>(

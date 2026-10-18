@@ -17,8 +17,7 @@ use blsttc::{
 };
 use codec::{Decode, Encode};
 use hotstuff_crypto::sign::{
-    AggregateSignature, AssemblyError, CertificateCollector, Digest, PartialSignature, Scheme,
-    Signature,
+    AggregateSignature, AssemblyError, Certificate, Digest, PartialSignature, Scheme, Signature,
 };
 use hotstuff_types::node::NodeID;
 use hotstuff_types::threshold::{OneHonest, Quorum, Threshold};
@@ -243,25 +242,18 @@ fn main() {
         );
     }
 
-    // 2. The collector verifies each share and assembles once the quorum is reached.
-    let mut collector =
-        CertificateCollector::<Quorum, Tbls>::new(&verifier, data_hash);
-    println!("\ncollecting, {} shares still needed", collector.require());
-
-    let mut certificate = None;
-    for partial in partials {
-        let id = partial.node_id();
-        match collector.add_partial(partial) {
-            Ok(Some(cert)) => {
-                println!("  {id:?} completed the quorum -> {cert:?}");
-                certificate = Some(cert);
-                break;
-            }
-            Ok(None) => println!("  {id:?} accepted, {} still needed", collector.require()),
-            Err(err) => println!("  {id:?} rejected: {err}"),
-        }
-    }
-    let certificate = certificate.expect("a quorum of honest shares certifies");
+    // 2. Verify each share, then assemble the first quorum that passes.
+    let accepted: Vec<_> = partials
+        .into_iter()
+        .filter(|partial| verifier.verify_partial(data_hash, partial))
+        .take(quorum as usize)
+        .collect();
+    println!("\nassembling from {} verified shares", accepted.len());
+    let aggregate = verifier
+        .aggregate(data_hash, accepted.into_iter())
+        .expect("a quorum of honest shares certifies");
+    let certificate = Certificate::<_, Quorum, _>::new(data_hash, aggregate);
+    println!("  -> {certificate:?}");
 
     // 3. Verification: the cryptography and the threshold, against the verifier's own
     //    committee. The subject comes from the certificate; the committee size and the
@@ -289,13 +281,11 @@ fn main() {
         certificate.data_hash() == other && verifier.verify_certificate::<Quorum>(&certificate)
     );
 
-    // 4. A share from outside the committee never reaches the aggregate.
+    // 4. A share from outside the committee fails verification.
     let (outsiders, _) = Tbls::deal(N, quorum);
     let forged = outsiders[0].sign(data_hash).expect("committee member");
-    let mut fresh =
-        CertificateCollector::<Quorum, Tbls>::new(&verifier, data_hash);
-    match fresh.add_partial(forged) {
-        Err(err) => println!("\nshare from another dealing: {err}"),
-        Ok(_) => println!("\nshare from another dealing was accepted -- that would be a bug"),
-    }
+    println!(
+        "\nshare from another dealing verifies: {}",
+        verifier.verify_partial(data_hash, &forged)
+    );
 }

@@ -12,7 +12,7 @@ pub struct Block<S: Scheme, C: Command> {
     pub hash: S::Digest,
 }
 
-pub trait Command: Encode + Decode + Clone {}
+pub trait Command: Encode + Decode + Clone + Send + 'static {}
 
 #[derive(Encode, Decode)]
 pub struct Proposal<S: Scheme, C: Command> {

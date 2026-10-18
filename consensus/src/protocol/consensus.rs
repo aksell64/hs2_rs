@@ -173,12 +173,4 @@ impl<S: Scheme> Consensus<S> {
             view: request.view,
         })))
     }
-
-    pub(crate) fn is_valid_qc(&self, qc: &BlockQC<S>) -> bool {
-        self.notary.verify_qc(qc)
-    }
-
-    pub(crate) fn verify_block_hash<C: Command>(&self, block: &Block<S, C>) -> bool {
-        self.notary.verify_block_hash(block)
-    }
 }

@@ -2,7 +2,7 @@ use crate::types::clock::Clock;
 use crate::types::{EpochTimeouts, View, ViewTimeout};
 use std::ops::RangeInclusive;
 
-pub trait TimeoutPolicy {
+pub trait TimeoutPolicy: Send + 'static {
     type Clock: Clock;
 
     fn epoch_deadlines(&self, views: RangeInclusive<View>, start: Self::Clock) -> EpochTimeouts<Self::Clock>;

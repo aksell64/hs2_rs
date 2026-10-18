@@ -8,6 +8,8 @@ pub mod vote;
 pub mod mempool;
 pub mod clock;
 pub mod crypto;
+pub mod wish;
+mod genesis;
 
 pub struct ViewTimeout<CL: Clock> {
     pub view: View,

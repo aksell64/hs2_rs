@@ -4,7 +4,7 @@ pub trait Clock: Copy + Ord + Send + Sync + 'static {
     fn scale(d: Self::Duration, times: u32) -> Self::Duration;
 }
 
-pub trait Source {
+pub trait Source: Send + 'static {
     type Clock: Clock;
     fn now(&self) -> Self::Clock;
 }

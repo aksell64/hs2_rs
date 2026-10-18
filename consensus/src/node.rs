@@ -2,6 +2,7 @@ use crate::blocksync::service::BlockSyncService;
 use crate::network::message::Message;
 use crate::network::network::{Network, NetworkEvent, send_envelope};
 use crate::protocol::driver::DriverInput;
+use crate::protocol::leaders::LeaderPolicy;
 use crate::protocol::timeouts::TimeoutPolicy;
 use crate::sm::{Effects, NodeState};
 use crate::storage::{KVError, Storage};
@@ -22,11 +23,12 @@ struct Node<
     M: Mempool<C>,
     TP: TimeoutPolicy,
     TS: Source<Clock = TP::Clock>,
+    LP: LeaderPolicy,
 > {
     network: N,
     blocksync: B,
     timers: T,
-    state: NodeState<S, C, DB, M, TP, TS>,
+    state: NodeState<S, C, DB, M, TP, TS, LP>,
 }
 
 impl<
@@ -39,7 +41,8 @@ impl<
     M: Mempool<C>,
     TP: TimeoutPolicy,
     TS: Source<Clock = TP::Clock>,
-> Node<S, C, N, B, T, DB, M, TP, TS>
+    LP: LeaderPolicy,
+> Node<S, C, N, B, T, DB, M, TP, TS, LP>
 {
     pub async fn run(mut self) -> Result<(), KVError> {
         loop {
@@ -90,3 +93,4 @@ impl<
         }
     }
 }
+

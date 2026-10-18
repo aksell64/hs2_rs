@@ -1,12 +1,11 @@
 use crate::types::View;
 use crate::types::block::{Block, Command};
 use crate::types::certificate::{BlockQC, QuorumCertificate};
-use crate::types::crypto::Subject;
+use crate::types::crypto::Signable;
 use crate::types::vote::Vote;
 use codec::{Decode, Encode};
 use hotstuff_crypto::sign::{
-    AggregateSignature, AssemblyError, CertificateCollector, Digest, PartialSignature, Scheme,
-    Signature,
+    AggregateSignature, AssemblyError, Certificate, Digest, PartialSignature, Scheme, Signature,
 };
 use hotstuff_types::node::NodeID;
 use hotstuff_types::threshold::{Quorum, Threshold};
@@ -90,14 +89,10 @@ pub fn digest(n: u32) -> TestDigest {
 
 pub fn qc(scheme: &TestScheme, view: View, block: TestDigest) -> BlockQC<TestScheme> {
     let subject = Vote { view, block };
-    let mut collector = CertificateCollector::<Quorum, _>::new(scheme, subject.digest(scheme));
-    let raw = (0..scheme.n)
-        .find_map(|i| {
-            collector
-                .add_partial(PartialSignature::new(NodeID::from(i), TestSignature))
-                .unwrap()
-        })
-        .unwrap();
+    let digest = subject.digest(scheme);
+    let partials = (0..Quorum::required(scheme.n))
+        .map(|i| PartialSignature::new(NodeID::from(i), TestSignature));
+    let raw = Certificate::new(digest, scheme.aggregate(digest, partials).unwrap());
     QuorumCertificate { subject, raw }
 }
 

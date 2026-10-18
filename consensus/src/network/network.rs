@@ -39,7 +39,7 @@ pub enum NetworkEvent {
     Message { from: NodeID, bytes: Bytes },
 }
 
-pub trait Network {
+pub trait Network: Send + 'static {
     type PeerKey: PeerKey;
     fn update_recipients(&mut self, m: NodeMap<Self::PeerKey>);
     fn send(&self, msg: Bytes, to: NodeID) -> Result<(), SendError>;

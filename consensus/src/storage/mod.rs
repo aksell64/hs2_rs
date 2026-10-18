@@ -48,7 +48,7 @@ pub trait ReadStorage<S: Scheme, C: Command> {
     }
 }
 
-pub trait Storage<S: Scheme, C: Command>: ReadStorage<S, C> {
+pub trait Storage<S: Scheme, C: Command>: ReadStorage<S, C> + Send + 'static {
     type WriteBatch: WriteStorage<S, C>;
 
     fn new_write_batch(&self) -> Self::WriteBatch;

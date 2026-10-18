@@ -1,5 +1,6 @@
 use crate::network::message::Envelope;
 use crate::protocol::driver::{Driver, DriverInput, DriverOutput};
+use crate::protocol::leaders::LeaderPolicy;
 use crate::protocol::timeouts::TimeoutPolicy;
 use crate::storage::{KVError, Storage};
 use crate::storage::staged::StagedStorage;
@@ -22,8 +23,9 @@ pub struct NodeState<
     M: Mempool<C>,
     TP: TimeoutPolicy,
     TS: Source<Clock = TP::Clock>,
+    LP: LeaderPolicy,
 > {
-    driver: Driver<S, C, TP, TS>,
+    driver: Driver<S, C, TP, TS, LP>,
     queue: VecDeque<DriverInput<S, C>>,
     db: DB,
     mempool: M,
@@ -36,7 +38,8 @@ impl<
     M: Mempool<C>,
     TP: TimeoutPolicy,
     TS: Source<Clock = TP::Clock>,
-> NodeState<S, C, DB, M, TP, TS>
+    LP: LeaderPolicy,
+> NodeState<S, C, DB, M, TP, TS, LP>
 {
     pub fn add_event_to_queue(&mut self, evt: DriverInput<S, C>) {
         self.queue.push_back(evt);
@@ -58,6 +61,7 @@ impl<
                 DriverOutput::Replay(replay) => self.queue.push_front(replay),
             }
         }
+
         Ok(Some(Effects {
             net: result.net,
             timers: result.timers,

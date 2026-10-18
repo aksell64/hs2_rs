@@ -1,5 +1,6 @@
 use crate::network::message::{Message, Recipient};
 use crate::protocol::effects::{Effect, send_to, send_to_each};
+use crate::protocol::leaders::LeaderPolicy;
 use crate::protocol::timeouts::TimeoutPolicy;
 use crate::storage::{KVError, ReadWriteStorage};
 use crate::timer::service::TimerCommand;
@@ -11,6 +12,7 @@ use crate::types::crypto::Notary;
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
 use std::collections::BTreeSet;
+use crate::types::wish::Wish;
 
 pub enum PacemakerInput<S: Scheme> {
     ReceivedQC(BlockQC<S>),
@@ -51,7 +53,12 @@ impl<S: Scheme, C: Command, CL: Clock> PacemakerResult<S, C, CL> {
     }
 }
 
-pub struct Pacemaker<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> {
+pub struct Pacemaker<
+    S: Scheme,
+    TP: TimeoutPolicy,
+    TS: Source<Clock = TP::Clock>,
+    LP: LeaderPolicy,
+> {
     notary: Notary<S>,
     id: NodeID,
     statuses: BTreeSet<NodeID>,
@@ -60,16 +67,20 @@ pub struct Pacemaker<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>
     scheduled_epoch: Option<View>,
     source: TS,
     policy: TP,
+    leaders: LP,
 }
 
 type PacemakerApply<S, C, CL> = Result<PacemakerResult<S, C, CL>, KVError>;
 
-impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, TP, TS> {
+impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPolicy>
+    Pacemaker<S, TP, TS, LP>
+{
     pub fn new(
         notary: Notary<S>,
         id: NodeID,
         source: TS,
         policy: TP,
+        leaders: LP,
     ) -> Self {
         Self {
             notary,
@@ -80,6 +91,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, T
             scheduled_epoch: None,
             source,
             policy,
+            leaders,
         }
     }
 
@@ -98,8 +110,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, T
     }
 
     pub fn leader(&self, view: View) -> NodeID {
-        let committee_size = View::from(self.notary.committee_size());
-        NodeID::from((view % committee_size) as u32)
+        self.leaders.leader(view)
     }
 
     pub fn is_leader(&self, view: View) -> bool {
@@ -107,25 +118,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, T
     }
 
     pub fn is_epoch_leader(&self, view: View) -> bool {
-        self.epoch_leaders(view).contains(&self.id)
-    }
-
-    fn epoch_length(&self) -> View {
-        View::from((self.notary.committee_size().saturating_sub(1)) / 3 + 1)
-    }
-
-    fn epoch_of(&self, view: View) -> View {
-        view / self.epoch_length()
-    }
-
-    fn epoch_end(&self, view: View) -> View {
-        view - view % self.epoch_length() + self.epoch_length() - 1
-    }
-
-    fn epoch_leaders(&self, view: View) -> BTreeSet<NodeID> {
-        let epoch_length = self.epoch_length();
-        let first = view - view % epoch_length;
-        (0..epoch_length).map(|k| self.leader(first + k)).collect()
+        self.leaders.epoch_leaders(view).contains(&self.id)
     }
 
     fn process_qc<C: Command, DB: ReadWriteStorage<S, C>>(
@@ -162,10 +155,10 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, T
             Effect::Timer(TimerCommand::ClearLockTimer(previous)),
             Effect::Timer(TimerCommand::ClearViewTimersBelow(view)),
         ];
-        let epoch = self.epoch_of(view);
+        let epoch = self.leaders.epoch_of(view);
         if self.scheduled_epoch < Some(epoch) {
             self.scheduled_epoch = Some(epoch);
-            let deadlines = self.policy.epoch_deadlines(view..=self.epoch_end(view), start);
+            let deadlines = self.policy.epoch_deadlines(view..=self.leaders.epoch_end(view), start);
             timers.push(Effect::Timer(TimerCommand::SetEpochTimers(deadlines)));
         }
         let entered = self.enter_view(storage, view, start)?;
@@ -235,13 +228,19 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, T
             return Ok(PacemakerResult::no_change());
         }
         let next = view + 1;
-        if !self.is_epoch_view(next) {
+        if !self.leaders.is_epoch_start(next) {
             return self.advance_view(storage, next);
         }
         if !self.sent_wish.insert(next) {
             return Ok(PacemakerResult::no_change());
         }
-        let wishes = send_to_each(self.epoch_leaders(next), || Message::WishMsg(next));
+        let Some(wish) = self.notary.sign(Wish { view: next }) else {
+            return Ok(PacemakerResult::no_change());
+        };
+
+        let wishes = send_to_each(self.leaders.epoch_leaders(next), || {
+            Message::WishMsg(wish.clone())
+        });
         Ok(PacemakerResult::no_change().with_effects(wishes))
     }
 
@@ -253,7 +252,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, T
         if !self.notary.verify_qc(&tc) || !self.relayed_tc.insert(tc.view()) {
             return Ok(PacemakerResult::no_change());
         }
-        let leaders = self.epoch_leaders(tc.view());
+        let leaders = self.leaders.epoch_leaders(tc.view());
         let relay = if leaders.contains(&self.id) {
             vec![send_to(Recipient::All, Message::TCMsg(tc.clone()))]
         } else {
@@ -272,9 +271,5 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>> Pacemaker<S, T
             return Ok(PacemakerResult::no_change());
         }
         self.process_qc(storage, status.qc)
-    }
-
-    fn is_epoch_view(&self, view: View) -> bool {
-        view % self.epoch_length() == 0
     }
 }

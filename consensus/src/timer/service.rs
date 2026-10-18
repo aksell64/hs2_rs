@@ -17,7 +17,7 @@ pub enum TimerCommand<CL: Clock> {
     ClearViewTimersBelow(View),
 }
 
-pub trait TimerService<CL: Clock> {
+pub trait TimerService<CL: Clock>: Send + 'static {
     fn set_epoch_timers(&mut self, timeouts: EpochTimeouts<CL>);
     fn set_lock_timer(&mut self, timeout: ViewTimeout<CL>);
     fn stop_lock_timer(&mut self, view: View);
