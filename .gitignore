@@ -2,3 +2,5 @@
 .idea/
 trace.itf.json
 analisys.md
+todo.md
+docs/spec/quint/tools/analyze.py

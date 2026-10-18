@@ -6,13 +6,14 @@ module state_machine {
   import collector.* from "./collector"
   import driver.* from "./driver"
   import network.* from "./network"
+  import effects.* from "./effects"
 
   type NodeState = {
     node_id: NodeID,
     driver: Driver,
     kv: KVStorage,
     queue: List[DriverInput],
-    view_timer: Option[View],
+    view_timers: Set[View],
     lock_timer: Option[View],
   }
 
@@ -59,11 +60,15 @@ module state_machine {
 
   pure def handle_driver_output(state: NodeState, out: DriverOutput): NodeState =
     match out {
-      | NewView(v) => push_to_queue_front(state, EnterView(v))
       | Replay(input) => push_to_queue_front(state, input)
-      | SetViewTimer(v) => state.with("view_timer", Some(v))
+    }
+
+  pure def apply_timer(state: NodeState, t: TimerCommand): NodeState =
+    match t {
+      | SetViewTimer(v) => state.with("view_timers", state.view_timers.union(Set(v)))
       | SetLockTimer(v) => state.with("lock_timer", Some(v))
       | ClearLockTimer(v) => if (state.lock_timer == Some(v)) state.with("lock_timer", None) else state
+      | ClearViewTimersBelow(v) => state.with("view_timers", state.view_timers.filter(w => w >= v))
     }
 
   pure def check_missing_parent(kv: KVStorage, input: DriverInput): SmOutput =
@@ -93,8 +98,10 @@ module state_machine {
         else
           val res = apply_driver(popped.state.driver, popped.state.kv, input)
           val updated = popped.state.with("driver", res.driver).with("kv", res.kv)
+          val replayed = res.out.foldl(updated, handle_driver_output)
+          val timed = res.timers.foldl(replayed, apply_timer)
           {
-            state: res.out.foldl(updated, (s, o) => handle_driver_output(s, o)),
+            state: timed,
             net: res.net.foldl(received.net, (acc, env) => send(acc, state.node_id, env.to, env.msg)),
             out: NoSmOutput,
           }

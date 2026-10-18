@@ -1,9 +1,10 @@
-pub mod pacemaker;
+pub mod protocol;
 pub mod types;
 pub mod blocksync;
-pub mod consensus;
-pub mod collector;
 pub mod storage;
 pub mod network;
-mod sm;
-mod driver;
+pub mod sm;
+pub mod timer;
+mod node;
+#[cfg(any(test, feature = "testing"))]
+pub mod mocks;

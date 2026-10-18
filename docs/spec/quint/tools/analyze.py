@@ -99,9 +99,11 @@ def describe(prev, cur):
     i = changed[0]
     p, c = pn[i], cn[i]
     pq, cq = p['queue'], c['queue']
-    for timer, event in (('view_timer', 'ViewTimerFired'), ('lock_timer', 'LockTimerFired')):
-        if p[timer]['tag'] == 'Some' and c[timer]['tag'] == 'None' and cq[-1:] == [{'tag': event, 'value': p[timer]['value']}]:
-            return f'node {i}: {timer} fired → `{fmt(cq[-1])}`'
+    fired = [v for v in p['view_timers']['#set'] if v not in c['view_timers']['#set']]
+    if fired and p['driver'] == c['driver'] and cq[-1:] == [{'tag': 'ViewTimerFired', 'value': fired[0]}]:
+        return f'node {i}: view_timer fired → `{fmt(cq[-1])}`'
+    if p['lock_timer']['tag'] == 'Some' and c['lock_timer']['tag'] == 'None' and cq[-1:] == [{'tag': 'LockTimerFired', 'value': p['lock_timer']['value']}]:
+        return f'node {i}: lock_timer fired → `{fmt(cq[-1])}`'
     if cq[:len(pq)] == pq and len(cq) == len(pq) + 1 and p['driver'] == c['driver'] and faulty_sender(cq[-1], set(cn)):
         return f'node {i}: faulty node delivered `{fmt(cq[-1])}`'
     old, new = pi.get(i, []), ci.get(i, [])
@@ -120,7 +122,7 @@ ROWS = [
     ('pacemaker', ['cur_view', 'cur_leader', 'high_qc', 'proposed', 'statuses', 'sent_wish', 'relayed_tc', 'id']),
     ('consensus', ['voted_view', 'qc_lock', 'exec_height', 'exec_hash']),
     ('driver', ['pending']),
-    ('node', ['view_timer', 'lock_timer', 'queue']),
+    ('node', ['view_timers', 'lock_timer', 'queue']),
 ]
 
 

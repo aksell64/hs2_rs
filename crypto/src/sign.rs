@@ -1,7 +1,6 @@
 use codec::{Decode, Encode};
 use hotstuff_types::node::NodeID;
 use hotstuff_types::threshold::Threshold;
-use std::collections::HashMap;
 use std::fmt::{self, Debug, Display};
 use std::marker::PhantomData;
 
@@ -43,7 +42,7 @@ pub struct Certificate<D: Digest, T: Threshold, A: AggregateSignature> {
 }
 
 impl<D: Digest, T: Threshold, A: AggregateSignature> Certificate<D, T, A> {
-    pub(crate) fn new(data_hash: D, aggregate: A) -> Self {
+    pub fn new(data_hash: D, aggregate: A) -> Self {
         Self {
             data_hash,
             aggregate,
@@ -87,9 +86,6 @@ pub enum AssemblyError {
     /// be blamed for it. A scheme that verifies every share before assembling reaches
     /// this only when the set itself is wrong -- too few shares, most often.
     Invalid,
-    /// The threshold was already met: this collector has handed out its certificate and
-    /// takes no further shares.
-    AlreadyReady,
 }
 
 impl Display for AssemblyError {
@@ -99,17 +95,18 @@ impl Display for AssemblyError {
             Self::Duplicate(id) => write!(f, "duplicate share from {id:?}"),
             Self::InvalidShare(id) => write!(f, "invalid share from {id:?}"),
             Self::Invalid => f.write_str("the shares did not combine into a valid aggregate"),
-            Self::AlreadyReady => f.write_str("the certificate is already ready"),
         }
     }
 }
 
 impl std::error::Error for AssemblyError {}
 
-pub trait Scheme {
+pub trait Scheme: Send + Sync + 'static {
     type Signature: Signature;
     type Digest: Digest;
     type Aggregate: AggregateSignature;
+
+    fn hash(&self, bytes: &[u8]) -> Self::Digest;
 
     fn committee_size(&self) -> u32;
 
@@ -143,61 +140,9 @@ pub trait Scheme {
     }
 }
 
-pub struct CertificateCollector<'a, T: Threshold, S: Scheme> {
-    scheme: &'a S,
-    _threshold: PhantomData<T>,
-    signs: HashMap<NodeID, PartialSignature<S::Signature>>,
-    n: u32,
-    data_hash: S::Digest,
-}
-
-impl<'a, T: Threshold, S: Scheme> CertificateCollector<'a, T, S> {
-    pub fn new(scheme: &'a S, data_hash: S::Digest) -> Self {
-        Self {
-            scheme,
-            _threshold: PhantomData,
-            data_hash,
-            n: scheme.committee_size(),
-            signs: HashMap::new(),
-        }
-    }
-
-    pub fn add_partial(
-        &mut self,
-        partial: PartialSignature<S::Signature>,
-    ) -> Result<Option<Certificate<S::Digest, T, S::Aggregate>>, AssemblyError> {
-        if self.require() == 0 {
-            return Err(AssemblyError::AlreadyReady);
-        }
-
-        if !self.scheme.verify_partial(self.data_hash, &partial) {
-            return Err(AssemblyError::InvalidShare(partial.node_id()));
-        }
-
-        self.signs.insert(partial.node_id(), partial.clone());
-
-        if self.signs.len() as u32 >= T::required(self.n) {
-            let result = self
-                .scheme
-                .aggregate(self.data_hash, self.signs.values().cloned())?;
-            let cert = Certificate::new(self.data_hash, result);
-            return Ok(Some(cert));
-        }
-
-        Ok(None)
-    }
-
-    fn count_signers(&self) -> u32 {
-        self.signs.len() as u32
-    }
-
-    pub fn require(&self) -> u32 {
-        T::required(self.n) - self.count_signers()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::hash::{DefaultHasher, Hash, Hasher};
     use super::*;
     use hotstuff_types::threshold::{OneHonest, Quorum};
     use std::collections::BTreeSet;
@@ -232,16 +177,9 @@ mod tests {
 
     impl AggregateSignature for TestAggregate {}
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Assembly {
-        Combines,
-        Fails,
-    }
-
     struct TestScheme {
         n: u32,
         index: Option<NodeID>,
-        assembly: Assembly,
     }
 
     impl TestScheme {
@@ -249,23 +187,11 @@ mod tests {
             Self {
                 n: N,
                 index: Some(NodeID::from(index)),
-                assembly: Assembly::Combines,
             }
         }
 
         fn verifier() -> Self {
-            Self {
-                n: N,
-                index: None,
-                assembly: Assembly::Combines,
-            }
-        }
-
-        fn cannot_assemble() -> Self {
-            Self {
-                assembly: Assembly::Fails,
-                ..Self::verifier()
-            }
+            Self { n: N, index: None }
         }
 
         fn in_committee(&self, id: NodeID) -> bool {
@@ -278,6 +204,12 @@ mod tests {
         type Signature = TestShare;
         type Digest = TestDigest;
         type Aggregate = TestAggregate;
+
+        fn hash(&self, bytes: &[u8]) -> TestDigest {
+            let mut state = DefaultHasher::new();
+            bytes.hash(&mut state);
+            TestDigest((state.finish() as u32).to_be_bytes())
+        }
 
         fn committee_size(&self) -> u32 {
             self.n
@@ -315,9 +247,6 @@ mod tests {
         where
             I: Iterator<Item = PartialSignature<TestShare>>,
         {
-            if self.assembly == Assembly::Fails {
-                return Err(AssemblyError::Invalid);
-            }
             let mut signers = BTreeSet::new();
             for partial in partials {
                 let id = partial.node_id();
@@ -362,64 +291,20 @@ mod tests {
             .expect("committee member")
     }
 
-    fn malformed_share(index: u32) -> PartialSignature<TestShare> {
-        let signer = NodeID::from(index);
-        PartialSignature::new(
-            signer,
-            TestShare {
-                subject: subject(),
-                signer,
-                well_formed: false,
-            },
-        )
-    }
-
-    fn quorum_of(
+    fn certify<T: Threshold>(
         scheme: &TestScheme,
         ids: &[u32],
-    ) -> Certificate<TestDigest, Quorum, TestAggregate> {
-        let mut collector = CertificateCollector::<Quorum, _>::new(scheme, subject());
-        for id in ids {
-            if let Some(certificate) = collector.add_partial(share(*id)).expect("valid share") {
-                return certificate;
-            }
-        }
-        panic!("{ids:?} did not reach a quorum");
-    }
-
-    #[test]
-    fn require_counts_down_to_the_threshold() {
-        let scheme = TestScheme::verifier();
-        let mut collector = CertificateCollector::<Quorum, _>::new(&scheme, subject());
-
-        assert_eq!(collector.require(), 3, "a quorum of four is three");
-        assert!(
-            collector
-                .add_partial(share(0))
-                .expect("valid share")
-                .is_none()
-        );
-        assert_eq!(collector.require(), 2);
-        assert!(
-            collector
-                .add_partial(share(1))
-                .expect("valid share")
-                .is_none()
-        );
-        assert_eq!(collector.require(), 1);
-        assert!(
-            collector
-                .add_partial(share(2))
-                .expect("valid share")
-                .is_some()
-        );
-        assert_eq!(collector.require(), 0);
+    ) -> Certificate<TestDigest, T, TestAggregate> {
+        let aggregate = scheme
+            .aggregate(subject(), ids.iter().map(|id| share(*id)))
+            .expect("valid shares");
+        Certificate::new(subject(), aggregate)
     }
 
     #[test]
     fn a_quorum_certifies_and_verifies() {
         let scheme = TestScheme::verifier();
-        let certificate = quorum_of(&scheme, &[0, 1, 2]);
+        let certificate = certify::<Quorum>(&scheme, &[0, 1, 2]);
 
         assert_eq!(certificate.data_hash(), subject());
         assert_eq!(certificate.aggregate().signers.len(), 3);
@@ -429,12 +314,7 @@ mod tests {
     #[test]
     fn the_threshold_kind_decides_what_the_same_shares_prove() {
         let scheme = TestScheme::verifier();
-        let mut collector = CertificateCollector::<OneHonest, _>::new(&scheme, subject());
-        collector.add_partial(share(0)).expect("valid share");
-        let certificate = collector
-            .add_partial(share(1))
-            .expect("valid share")
-            .expect("two of four proves an honest signer");
+        let certificate = certify::<OneHonest>(&scheme, &[0, 1]);
 
         assert!(scheme.verify_certificate::<OneHonest>(&certificate));
         assert!(!scheme.verify_aggregate::<Quorum>(subject(), certificate.aggregate()));
@@ -443,7 +323,7 @@ mod tests {
     #[test]
     fn verify_certificate_reads_the_subject_off_the_certificate() {
         let scheme = TestScheme::verifier();
-        let genuine = quorum_of(&scheme, &[0, 1, 2]);
+        let genuine = certify::<Quorum>(&scheme, &[0, 1, 2]);
         assert!(scheme.verify_certificate::<Quorum>(&genuine));
 
         let relabelled =
@@ -458,7 +338,7 @@ mod tests {
     #[test]
     fn the_committee_size_comes_from_the_verifier() {
         let scheme = TestScheme::verifier();
-        let certificate = quorum_of(&scheme, &[0, 1, 2]);
+        let certificate = certify::<Quorum>(&scheme, &[0, 1, 2]);
 
         let larger = TestScheme {
             n: 10,
@@ -468,70 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn a_share_that_fails_verification_is_rejected_and_named() {
-        let scheme = TestScheme::verifier();
-        let mut collector = CertificateCollector::<Quorum, _>::new(&scheme, subject());
-
-        assert_eq!(
-            collector.add_partial(malformed_share(2)).unwrap_err(),
-            AssemblyError::InvalidShare(NodeID::from(2))
-        );
-        assert_eq!(collector.require(), 3, "a rejected share does not count");
-    }
-
-    #[test]
-    fn a_share_for_another_subject_is_rejected() {
-        let scheme = TestScheme::verifier();
-        let mut collector = CertificateCollector::<Quorum, _>::new(&scheme, other_subject());
-
-        assert_eq!(
-            collector.add_partial(share(0)).unwrap_err(),
-            AssemblyError::InvalidShare(NodeID::from(0))
-        );
-    }
-
-    #[test]
-    fn a_share_from_outside_the_committee_is_rejected() {
-        let scheme = TestScheme::verifier();
-        let mut collector = CertificateCollector::<Quorum, _>::new(&scheme, subject());
-        let outsider = TestScheme {
-            n: N + 1,
-            index: Some(NodeID::from(N)),
-            assembly: Assembly::Combines,
-        }
-        .sign(subject())
-        .expect("member of the larger committee");
-
-        assert_eq!(
-            collector.add_partial(outsider).unwrap_err(),
-            AssemblyError::InvalidShare(NodeID::from(N))
-        );
-    }
-
-    #[test]
     fn a_verify_only_scheme_cannot_sign() {
         assert!(TestScheme::verifier().sign(subject()).is_none());
         assert!(TestScheme::signer(0).sign(subject()).is_some());
     }
 
     #[test]
-    fn the_collector_takes_no_shares_once_it_has_certified() {
-        let scheme = TestScheme::verifier();
-        let mut collector = CertificateCollector::<Quorum, _>::new(&scheme, subject());
-        for id in [0, 1, 2] {
-            collector.add_partial(share(id)).expect("valid share");
-        }
-
-        assert_eq!(
-            collector.add_partial(share(3)).unwrap_err(),
-            AssemblyError::AlreadyReady
-        );
-    }
-
-    #[test]
     fn a_certificate_survives_a_codec_round_trip() {
         let scheme = TestScheme::verifier();
-        let certificate = quorum_of(&scheme, &[0, 1, 2]);
+        let certificate = certify::<Quorum>(&scheme, &[0, 1, 2]);
 
         let bytes = certificate.encode();
         let decoded = Certificate::<TestDigest, Quorum, TestAggregate>::decode(&mut &bytes[..])
@@ -560,51 +385,6 @@ mod tests {
         assert_eq!(
             AssemblyError::Invalid.to_string(),
             "the shares did not combine into a valid aggregate"
-        );
-        assert_eq!(
-            AssemblyError::AlreadyReady.to_string(),
-            "the certificate is already ready"
-        );
-    }
-
-    /// Lift the `ignore` once `add_partial` checks the map before inserting.
-    #[test]
-    #[ignore = "known defect: HashMap::insert overwrites instead of reporting Duplicate"]
-    fn a_repeated_share_is_reported_as_a_duplicate() {
-        let scheme = TestScheme::verifier();
-        let mut collector = CertificateCollector::<Quorum, _>::new(&scheme, subject());
-        collector.add_partial(share(0)).expect("valid share");
-
-        assert_eq!(
-            collector.add_partial(share(0)).unwrap_err(),
-            AssemblyError::Duplicate(NodeID::from(0))
-        );
-        assert_eq!(collector.require(), 2, "the repeat must not count");
-    }
-
-    /// Lift the `ignore` once a failed assembly rolls the insert back, or a state flag
-    /// replaces the length comparison in `require`.
-    #[test]
-    #[ignore = "known defect: a failed assembly wedges the collector and lies with AlreadyReady"]
-    fn a_failed_assembly_leaves_the_collector_usable() {
-        let scheme = TestScheme::cannot_assemble();
-        let mut collector = CertificateCollector::<Quorum, _>::new(&scheme, subject());
-        collector.add_partial(share(0)).expect("valid share");
-        collector.add_partial(share(1)).expect("valid share");
-
-        assert_eq!(
-            collector.add_partial(share(2)).unwrap_err(),
-            AssemblyError::Invalid
-        );
-        assert_eq!(
-            collector.require(),
-            1,
-            "the share that could not be used must not be counted"
-        );
-        assert_ne!(
-            collector.add_partial(share(3)).unwrap_err(),
-            AssemblyError::AlreadyReady,
-            "no certificate was ever handed out"
         );
     }
 }

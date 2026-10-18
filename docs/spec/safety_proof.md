@@ -40,7 +40,7 @@ P := множество реплик, проголосовавших за B_c в
 
 (3) **Каждый честный p ∈ P залочен на ⪰ B рангом ≥ v** — в момент своего голоса за B_c.
 Это НЕ следствие «цепочка прямая», а следствие правила лока и порядка вызовов в
-`onReceiveProposal`:
+`upon NewProposal`:
 - предложение B_c несёт `B_c.justify = QC(B)` (честный лидер строит B_c поверх B);
 - `onReceiveQC(B_c.justify)` вызывается ПЕРВЫМ, до проверки голосования;
 - в `onReceiveQC`: `if QC(B).viewNumber (=v) > qc_lock(p).viewNumber then qc_lock(p) ← QC(B)`.

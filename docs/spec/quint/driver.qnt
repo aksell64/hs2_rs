@@ -4,6 +4,7 @@ module driver {
   import consensus.* from "./consensus"
   import pacemaker.* from "./pacemaker"
   import collector.* from "./collector"
+  import effects.* from "./effects"
 
   type DriverInput =
   | NewProposal({ sender: NodeID, proposal: Proposal })
@@ -13,31 +14,10 @@ module driver {
   | NewTC(CertifiedView)
   | ViewTimerFired(View)
   | LockTimerFired(View)
-  | EnterView(View)
   | BlockSynced(Block)
 
   type DriverOutput =
-  | NewView(View)
-  | SetViewTimer(View)
-  | SetLockTimer(View)
-  | ClearLockTimer(View)
   | Replay(DriverInput)
-
-  type Message =
-  | ProposalMsg(Proposal)
-  | VoteMsg(GenericVote)
-  | WishMsg(View)
-  | StatusMsg({ qc: CertifiedBlock, view: View })
-  | TCMsg(CertifiedView)
-
-  type Recipient =
-  | All
-  | Node(NodeID)
-
-  type Envelope = {
-    to: Recipient,
-    msg: Message,
-  }
 
   type Driver = {
     consensus: Consensus,
@@ -50,6 +30,7 @@ module driver {
     driver: Driver,
     kv: KVStorage,
     net: List[Envelope],
+    timers: List[TimerCommand],
     out: List[DriverOutput],
   }
 
@@ -70,12 +51,11 @@ module driver {
       | NewTC(tc) => on_timeout_certificate(d, kv, tc)
       | ViewTimerFired(v) => on_view_timer_fired(d, kv, v)
       | LockTimerFired(v) => on_lock_timer_fired(d, kv, v)
-      | EnterView(v) => call_enter_view(d, kv, v)
       | BlockSynced(_) => driver_no_change(d, kv)
     }
 
   pure def driver_no_change(d: Driver, kv: KVStorage): DriverResult =
-    { driver: d, kv: kv, net: [], out: [] }
+    { driver: d, kv: kv, net: [], timers: [], out: [] }
 
   pure def add_out(o: DriverOutput, res: DriverResult): DriverResult =
     res.with("out", res.out.append(o))
@@ -85,46 +65,63 @@ module driver {
       driver: second.driver,
       kv: second.kv,
       net: first.net.concat(second.net),
+      timers: first.timers.concat(second.timers),
       out: first.out.concat(second.out),
     }
 
-  pure def prepend_outs(outs: List[DriverOutput], res: DriverResult): DriverResult =
-    res.with("out", outs.concat(res.out))
-
   pure def add_net_msg(receiver: Recipient, msg: Message, res: DriverResult): DriverResult =
     res.with("net", res.net.append({ to: receiver, msg: msg }))
-
-  pure def add_net_msg_to_each(nodes: Set[NodeID], msg: Message, res: DriverResult): DriverResult =
-    nodes.fold(res, (r, node) => add_net_msg(Node(node), msg, r))
 
   pure def call_consensus(d: Driver, kv: KVStorage, input: ConsensusInput): { driver: Driver, out: ConsensusOutput } =
     val r = apply_consensus(d.consensus, kv, d.pacemaker.get_current_view(), d.pacemaker.get_high_qc(), input)
     { driver: d.with("consensus", r.consensus), out: r.out }
 
-  pure def call_pacemaker(d: Driver, input: PacemakerInput): { driver: Driver, out: PacemakerOutput } =
+  pure def add_effect(res: DriverResult, e: Effect): DriverResult =
+    match e {
+      | Send(env) => add_net_msg(env.to, env.msg, res)
+      | Timer(t) => res.with("timers", res.timers.append(t))
+    }
+
+  pure def release_pending(res: DriverResult, v: View): DriverResult =
+    val released = pending_at(res.driver, v)
+    val pending = res.driver.pending.put(v, [])
+    val cleared = res.with("driver", res.driver.with("pending", pending))
+    released.foldl(cleared, (r, signed) => add_out(Replay(NewProposal(signed)), r))
+
+  pure def call_pacemaker(d: Driver, input: PacemakerInput): { driver: Driver, effects: List[Effect], out: PacemakerOutput } =
     val r = apply_pacemaker(d.pacemaker, input)
-    { driver: d.with("pacemaker", r.pacemaker), out: r.out }
+    { driver: d.with("pacemaker", r.pacemaker), effects: r.effects, out: r.out }
+
+  pure def handle_pacemaker_result(
+      before: Driver,
+      kv: KVStorage,
+      called: { driver: Driver, effects: List[Effect], out: PacemakerOutput }): DriverResult =
+    val old_view = before.pacemaker.get_current_view()
+    val base = driver_no_change(called.driver, kv)
+    val applied = called.effects.foldl(base, add_effect)
+    val new_view = called.driver.pacemaker.get_current_view()
+    val released = if (new_view > old_view) release_pending(applied, new_view) else applied
+    match called.out {
+      | ProposeNow(view) =>
+        val request = { hash: block_hash(view, released.driver.pacemaker.id), view: view }
+        val proposed = on_propose_request(released.driver, released.kv, request)
+        merge_results(released, proposed)
+      | NoPacemakerOutput => released
+    }
 
   pure def on_proposal(d: Driver, kv: KVStorage, signed: { sender: NodeID, proposal: Proposal }): DriverResult =
     val proposal = signed.proposal
-    if (signed.sender != d.pacemaker.get_leader_by_view(proposal.view))
+    if (signed.sender != d.pacemaker.get_leader_by_view(proposal.view)
+        or not(is_valid_qc(proposal.block.justify)))
       driver_no_change(d, kv)
     else
-      val received = call_consensus(d, kv, ReceivedProposal(proposal))
-      match received.out {
-        | ReceiveQC(qc) =>
-          val pcm = call_pacemaker(received.driver, ProcessQC(qc))
-          match pcm.out {
-            | HighQCUpdated(high_qc) =>
-              val advanced = call_process_new_high_qc(pcm.driver, kv, high_qc)
-              merge_results(advanced, call_proposal_or_buffer(advanced.driver, advanced.kv, signed))
-            | _ => call_proposal_or_buffer(pcm.driver, kv, signed)
-          }
-        | _ => driver_no_change(received.driver, kv)
-      }
+      val called = call_pacemaker(d, ReceivedQC(proposal.block.justify))
+      val processed = handle_pacemaker_result(d, kv, called)
+      val handled = call_proposal_or_buffer(processed.driver, processed.kv, signed)
+      merge_results(processed, handled)
 
   pure def call_proposal_qc_processed(d: Driver, kv: KVStorage, proposal: Proposal): DriverResult =
-    val processed = call_consensus(d, kv, QCProcessed(proposal))
+    val processed = call_consensus(d, kv, ReceivedProposal(proposal))
     match processed.out {
       | ConfirmVote(vote) =>
         val updated = call_update_locked(processed.driver, kv, proposal.block)
@@ -157,11 +154,8 @@ module driver {
         | GenericOutput(generic) =>
           match generic {
             | Ready(qc) =>
-              val pcm = call_pacemaker(collected, ProcessQC(qc))
-              match pcm.out {
-                | HighQCUpdated(high_qc) => call_process_new_high_qc(pcm.driver, kv, high_qc)
-                | _ => driver_no_change(pcm.driver, kv)
-              }
+              val called = call_pacemaker(collected, ReceivedQC(qc))
+              handle_pacemaker_result(collected, kv, called)
             | _ => driver_no_change(collected, kv)
           }
         | _ => driver_no_change(collected, kv)
@@ -177,62 +171,26 @@ module driver {
     }
 
   pure def on_view_timer_fired(d: Driver, kv: KVStorage, v: View): DriverResult =
-    val expired = call_pacemaker(d, TimerExpiredView(v))
-    match expired.out {
-      | AdvanceView(new_view) => call_advance_view(expired.driver, kv, new_view)
-      | SendWish(wish) =>
-        val result = driver_no_change(expired.driver, kv)
-        add_net_msg_to_each(wish.to, WishMsg(wish.view), result)
-      | _ => driver_no_change(expired.driver, kv)
-    }
+    val called = call_pacemaker(d, ViewTimerExpired(v))
+    handle_pacemaker_result(d, kv, called)
 
   pure def on_lock_timer_fired(d: Driver, kv: KVStorage, v: View): DriverResult =
-    val expired = call_pacemaker(d, LockTimerExpired(v))
-    match expired.out {
-      | ProposeNow(view) =>
-        on_propose_request(expired.driver, kv, {
-          hash: block_hash(view, expired.driver.pacemaker.id),
-          view: view,
-        })
-      | _ => driver_no_change(expired.driver, kv)
-    }
+    val called = call_pacemaker(d, LockTimerExpired(v))
+    handle_pacemaker_result(d, kv, called)
 
   pure def on_status(d: Driver, kv: KVStorage, status: { sender: NodeID, qc: CertifiedBlock, view: View }): DriverResult =
-    val received = call_pacemaker(d, ReceiveStatus(status))
-    match received.out {
-      | StatusIsLeader(s) =>
-        val pcm = call_pacemaker(received.driver, ProcessQC(s.qc))
-        match pcm.out {
-          | HighQCUpdated(high_qc) => call_process_new_high_qc(pcm.driver, kv, high_qc)
-          | _ => driver_no_change(pcm.driver, kv)
-        }
-      | _ => driver_no_change(received.driver, kv)
-    }
+    val called = call_pacemaker(d, ReceivedStatus(status))
+    handle_pacemaker_result(d, kv, called)
 
-  pure def call_advance_view(d: Driver, kv: KVStorage, v: View): DriverResult =
-    val advanced = call_pacemaker(d, AdvanceViewRequested(v))
-    match advanced.out {
-      | CancelLockTimer(timer) =>
-        val canceled = call_pacemaker(advanced.driver, LockTimerCanceled(timer.next))
-        match canceled.out {
-          | StartTimerView(timer_view) =>
-            val started = call_pacemaker(canceled.driver, ViewTimerStarted(timer_view))
-            val timers = prepend_outs([ClearLockTimer(timer.view), SetViewTimer(timer_view)], driver_no_change(started.driver, kv))
-            match started.out {
-              | EnterNewView(new_view) => add_out(NewView(new_view), timers)
-              | _ => timers
-            }
-          | _ => add_out(ClearLockTimer(timer.view), driver_no_change(canceled.driver, kv))
-        }
-      | _ => driver_no_change(advanced.driver, kv)
-    }
+  pure def on_timeout_certificate(d: Driver, kv: KVStorage, tc: CertifiedView): DriverResult =
+    val called = call_pacemaker(d, ReceivedTC(tc))
+    handle_pacemaker_result(d, kv, called)
 
   pure def on_wish(d: Driver, kv: KVStorage, wish: { sender: NodeID, view: View }): DriverResult =
-    val received = call_pacemaker(d, ReceiveWish(wish))
-    match received.out {
-      | ReceiveWishIsLeader(w) => call_wish_collector(received.driver, kv, w)
-      | _ => driver_no_change(received.driver, kv)
-    }
+    if (epoch_leaders(wish.view).contains(d.pacemaker.id))
+      call_wish_collector(d, kv, wish)
+    else
+      driver_no_change(d, kv)
 
   pure def call_wish_collector(d: Driver, kv: KVStorage, wish: { sender: NodeID, view: View }): DriverResult =
     val r = apply_collector(d.collector, WishInput(wish))
@@ -246,18 +204,6 @@ module driver {
       | _ => driver_no_change(collected, kv)
     }
 
-  pure def on_timeout_certificate(d: Driver, kv: KVStorage, tc: CertifiedView): DriverResult =
-    val relayed = call_pacemaker(d, TimeoutQC(tc))
-    match relayed.out {
-      | BroadcastTC(_) =>
-        val advanced = call_advance_view(relayed.driver, kv, tc.view)
-        add_net_msg(All, TCMsg(tc), advanced)
-      | SendTCToLeader(relay) =>
-        val advanced = call_advance_view(relayed.driver, kv, tc.view)
-        add_net_msg_to_each(relay.to, TCMsg(tc), advanced)
-      | _ => driver_no_change(relayed.driver, kv)
-    }
-
   pure def pending_at(d: Driver, v: View): List[{ sender: NodeID, proposal: Proposal }] =
     if (d.pending.keys().contains(v)) d.pending.get(v) else []
 
@@ -268,30 +214,4 @@ module driver {
     else
       call_proposal_qc_processed(d, kv, signed.proposal)
 
-  pure def call_enter_view(d: Driver, kv: KVStorage, v: View): DriverResult =
-    val released = pending_at(d, v)
-    val res = call_enter_view_requested(d.with("pending", d.pending.put(v, [])), kv, v)
-    released.foldl(res, (r, signed) => add_out(Replay(NewProposal(signed)), r))
-
-  pure def call_enter_view_requested(d: Driver, kv: KVStorage, v: View): DriverResult =
-    val entered = call_pacemaker(d, EnterViewRequested(v))
-    match entered.out {
-      | ProposeNow(view) =>
-        on_propose_request(entered.driver, kv, {
-          hash: block_hash(view, entered.driver.pacemaker.id),
-          view: view,
-        })
-      | StartLockTimer(lock_view) => add_out(SetLockTimer(lock_view), driver_no_change(entered.driver, kv))
-      | SendStatus(status) =>
-        val result = driver_no_change(entered.driver, kv)
-        add_net_msg(Node(status.to), StatusMsg({ qc: status.qc, view: status.view }), result)
-      | _ => driver_no_change(entered.driver, kv)
-    }
-
-  pure def call_process_new_high_qc(d: Driver, kv: KVStorage, high_qc: CertifiedBlock): DriverResult =
-    val applied = call_pacemaker(d, HighQCApplied(high_qc))
-    match applied.out {
-      | AdvanceView(new_view) => call_advance_view(applied.driver, kv, new_view)
-      | _ => driver_no_change(applied.driver, kv)
-    }
 }

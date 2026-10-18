@@ -1,6 +1,7 @@
 module scenariosTest {
   import types.* from "./types"
   import driver.* from "./driver"
+  import effects.* from "./effects"
   import network.* from "./network"
   import state_machine.* from "./sm"
   import pacemaker.* from "./pacemaker"
@@ -135,7 +136,7 @@ module scenariosTest {
       .expect(lock_of(1).view == 1)
       .then(inject(1, { sender: 3, msg: ProposalMsg(proposal(3, 1, 3, GENESIS_QC)) }))
       .then(fire_view_timer(1))
-      .then(4.reps(_ => checked_step(1)))
+      .then(3.reps(_ => checked_step(1)))
       // The fake block was handled in view 3: it is stored, and n1 did not vote for it.
       .expect(view_of(1) == 3)
       .expect(nodes.get(1).kv.block_by_hash.keys().contains(block_variant_hash(3, 3, 1)))

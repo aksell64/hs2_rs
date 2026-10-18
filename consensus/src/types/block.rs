@@ -1,19 +1,18 @@
 use codec::{Decode, Encode};
 use crate::types::View;
-use crate::types::certificate::CertifiedBlock;
+use crate::types::certificate::BlockQC;
 use hotstuff_crypto::sign::Scheme;
 
 #[derive(Encode, Decode)]
 pub struct Block<S: Scheme, C: Command> {
     pub parent: S::Digest,
     pub cmd: C,
-    pub justify: CertifiedBlock<S>,
+    pub justify: BlockQC<S>,
     pub height: u64,
     pub hash: S::Digest,
 }
 
-pub trait Command: Encode + Decode + Clone {}
-
+pub trait Command: Encode + Decode + Clone + Send + 'static {}
 
 #[derive(Encode, Decode)]
 pub struct Proposal<S: Scheme, C: Command> {
