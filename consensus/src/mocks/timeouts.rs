@@ -8,9 +8,7 @@ pub struct FixedPolicy<CL: Clock> {
     pub lock_timeout: CL::Duration,
 }
 
-impl<CL: Clock> TimeoutPolicy for FixedPolicy<CL> {
-    type Clock = CL;
-
+impl<CL: Clock> TimeoutPolicy<CL> for FixedPolicy<CL> {
     fn epoch_deadlines(&self, views: RangeInclusive<View>, start: CL) -> EpochTimeouts<CL> {
         let first = *views.start();
         let timeouts = views

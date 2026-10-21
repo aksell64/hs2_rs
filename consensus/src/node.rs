@@ -2,33 +2,55 @@ use crate::blocksync::service::BlockSyncService;
 use crate::network::message::Message;
 use crate::network::network::{Network, NetworkEvent, send_envelope};
 use crate::protocol::driver::DriverInput;
+use crate::protocol::driver::DriverInput::BlockSynced;
 use crate::protocol::leaders::LeaderPolicy;
 use crate::protocol::timeouts::TimeoutPolicy;
-use crate::sm::{Effects, NodeState};
-use crate::storage::{KVError, Storage};
+use crate::sm::{Effects, NodeError, NodeState};
+use crate::storage::Storage;
 use crate::timer::service::{TimerCommand, TimerEvent, TimerService};
 use crate::types::block::Command;
-use crate::types::clock::Source;
+use crate::types::clock::ClockSource;
+use crate::types::crypto::Notary;
+use crate::types::genesis::GenesisConfig;
 use crate::types::mempool::Mempool;
+use crate::types::output::Output;
 use codec::DecodeAll;
 use hotstuff_crypto::sign::Scheme;
+use hotstuff_types::node::NodeID;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
-struct Node<
+#[derive(Clone)]
+pub struct Client<C> {
+    tx: mpsc::UnboundedSender<C>,
+}
+
+impl<C> Client<C> {
+    pub fn propose(&self, cmd: C) {
+        let _ = self.tx.send(cmd);
+    }
+}
+
+
+pub struct Node<
     S: Scheme,
     C: Command,
     N: Network,
     B: BlockSyncService<S, C>,
-    T: TimerService<TP::Clock>,
+    T: TimerService<CS::Clock>,
     DB: Storage<S, C>,
     M: Mempool<C>,
-    TP: TimeoutPolicy,
-    TS: Source<Clock = TP::Clock>,
+    TP: TimeoutPolicy<CS::Clock>,
+    CS: ClockSource,
     LP: LeaderPolicy,
+    O: Output<S, C>,
 > {
     network: N,
     blocksync: B,
     timers: T,
-    state: NodeState<S, C, DB, M, TP, TS, LP>,
+    state: NodeState<S, C, DB, M, TP, CS, LP>,
+    out: O,
+    cmd_ch: mpsc::UnboundedReceiver<C>,
 }
 
 impl<
@@ -36,23 +58,61 @@ impl<
     C: Command,
     N: Network,
     B: BlockSyncService<S, C>,
-    T: TimerService<TP::Clock>,
+    T: TimerService<CS::Clock>,
     DB: Storage<S, C>,
     M: Mempool<C>,
-    TP: TimeoutPolicy,
-    TS: Source<Clock = TP::Clock>,
+    TP: TimeoutPolicy<CS::Clock>,
+    CS: ClockSource,
     LP: LeaderPolicy,
-> Node<S, C, N, B, T, DB, M, TP, TS, LP>
+    O: Output<S, C>,
+> Node<S, C, N, B, T, DB, M, TP, CS, LP, O>
 {
-    pub async fn run(mut self) -> Result<(), KVError> {
+    pub fn new(
+        scheme: S,
+        network: N,
+        blocksync: B,
+        timers: T,
+        db: DB,
+        mempool: M,
+        timeouts: TP,
+        source: CS,
+        leaders: LP,
+        out: O,
+        genesis: GenesisConfig<S, C>,
+        node_id: NodeID,
+    ) -> Result<(Self, Client<C>), NodeError> {
+        let notary = Notary::new(Arc::new(scheme));
+        let state = NodeState::new(
+            notary, db, mempool, node_id, source, timeouts, leaders, genesis,
+        )?;
+        let (cmd_tx, cmd_rc) = mpsc::unbounded_channel();
+
+        Ok((
+            Node {
+                network,
+                blocksync,
+                timers,
+                state,
+                out,
+                cmd_ch: cmd_rc,
+            },
+            Client { tx: cmd_tx },
+        ))
+    }
+
+    pub async fn run(mut self) -> Result<(), NodeError> {
         loop {
-            while let Some(effects) = self.state.apply()? {
-                self.execute_effects(effects);
-            }
+            self.apply_state()?;
 
             tokio::select! {
-                block = self.blocksync.next_block() => {
-                    self.state.add_event_to_queue(DriverInput::BlockSynced(block));
+                Some(cmd) = self.cmd_ch.recv() => {
+                   self.state.add_command(cmd);
+                }
+
+                branch = self.blocksync.next_branch() => {
+                    for block in branch {
+                        self.state.add_event_to_queue(BlockSynced(block))
+                    }
                 },
 
                 Some(event) = self.network.next() => match event {
@@ -75,16 +135,29 @@ impl<
         }
     }
 
-    fn execute_effects(&mut self, effects: Effects<S, C, TP::Clock>) {
+    fn apply_state(&mut self) -> Result<(), NodeError> {
+        while let Some(effects) = self.state.apply()? {
+            self.execute_effects(effects);
+        }
+        Ok(())
+    }
+
+    fn execute_effects(&mut self, effects: Effects<S, C, CS::Clock>) {
         for envelope in effects.net {
             let _ = send_envelope(envelope, &mut self.network);
         }
         for command in effects.timers {
             self.process_timer_command(command);
         }
+        for missing in effects.sync {
+            self.blocksync.request_block(missing);
+        }
+        for block in effects.committed {
+            self.out.on_committed(block);
+        }
     }
 
-    fn process_timer_command(&mut self, command: TimerCommand<TP::Clock>) {
+    fn process_timer_command(&mut self, command: TimerCommand<CS::Clock>) {
         match command {
             TimerCommand::SetEpochTimers(epoch) => self.timers.set_epoch_timers(epoch),
             TimerCommand::SetLockTimer(lock) => self.timers.set_lock_timer(lock),
@@ -93,4 +166,3 @@ impl<
         }
     }
 }
-

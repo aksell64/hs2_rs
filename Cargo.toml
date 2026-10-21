@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["consensus", "crypto", "examples/quint", "examples/tbls", "types"]
+members = ["consensus", "crypto", "examples/quint", "examples/tbls", "examples/tob", "types"]
 
 [workspace.package]
 version = "0.1.0"

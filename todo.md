@@ -4,6 +4,13 @@
 4) Tail-forking в конвейере: византийский L(v+1) выбрасывает голоса за блок L(v). Изучить защиту:
    reproposal из MonadBFT (tip в таймаутах, NEC) и carry-блоки (HotStuff-1, arXiv 2508.12173 «Carry the Tail in Consensus Protocols»).
    В Quint-модели видно: пары блоков на одной высоте после views 4k+2 (голоса уходят византийцу 3).
+5) Доказательство safety для любого числа нод и view (Quint проверяет только ограниченные трассы).
+   Veil (Lean 4 + SMT, в духе Ivy): абстрактная модель на отношениях (voted, qc, justify, ancestor,
+   кворумы с аксиомой пересечения), индуктивный инвариант усиливаем по контрпримерам к индукции (CTI).
+   Кандидаты в усиления уже есть в main.qnt: once_qc_in_view_inv, ancestry_inv, lock_protection_inv.
+   Главная трудность — поздние голоса: QC(V+1) может собраться после QC старших view, поэтому
+   инвариант формулируется для ещё собираемых кворумов (как в «Paxos Made EPR»).
+   Опционально Aeneas (Rust → Lean) для чистых функций: update lock, safe_node, commit rule.
 
 
 
@@ -19,6 +26,14 @@
 6) I12 (invariants.md): qc_high только на сохранённый блок. Варианты: обновлять qc_high только при
    сохранённом блоке, а view продвигать по любому валидному QC; или повторять ProcessQC после того,
    как blocksync догрузил блок.
+7) Сеть в Quint: FIFO отдельно по каждому отправителю вместо одной очереди на получателя.
+   inbox: NodeID -> (NodeID -> List[Packet]), apply_step(id, from) с nondet from среди отправителей
+   с непустой очередью (как TCP-соединение на пира). Сейчас родитель всегда приходит раньше потомка,
+   и MissingBlock/BlockSynced в симуляциях не срабатывают (n4f1v20: 0 запросов за 1000 шагов).
+   Затронет network.qnt, sm.qnt (pop_from_network), main.qnt (has_messages, step/step_fair/step_happy),
+   scenarios_test.qnt (apply_step), tools/analyze.py (inbox_of), MBT-обвязку (ящики по отправителям,
+   SpecNet). В Rust нужен мок сети с перестановкой между отправителями, иначе e2e тоже не задевает
+   blocksync.
 
 Проверить:
 

@@ -178,7 +178,7 @@ mod tests {
     type Store = KVStorage<MemoryKV<Vec<u8>, Vec<u8>>>;
 
     fn genesis_store() -> (TestScheme, Store) {
-        let scheme = TestScheme { n: 4 };
+        let scheme = TestScheme { n: 4, id: None };
         let genesis_qc = qc(&scheme, 0, digest(0));
         let genesis = block(digest(0), digest(0), genesis_qc.clone(), 0);
         let mut store: Store = KVStorage::new(MemoryKV::new());

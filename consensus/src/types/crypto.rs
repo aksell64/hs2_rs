@@ -80,7 +80,11 @@ impl<S: Scheme> Notary<S> {
         justify: &BlockQC<S>,
         height: u64,
     ) -> S::Digest {
-        self.scheme.hash(&(parent, cmd, justify, height).encode())
+        self.hash(&(parent, cmd, justify, height).encode())
+    }
+
+    pub fn hash(&self, bytes: &[u8]) -> S::Digest {
+        self.scheme.hash(bytes)
     }
 }
 
@@ -90,7 +94,7 @@ mod tests {
     use crate::mocks::scheme::{TestScheme, digest, qc};
 
     fn notary() -> Notary<TestScheme> {
-        Notary::new(Arc::new(TestScheme { n: 4 }))
+        Notary::new(Arc::new(TestScheme { n: 4, id: None }))
     }
 
     #[test]

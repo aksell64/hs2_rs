@@ -51,7 +51,7 @@ module driver {
       | NewTC(tc) => on_timeout_certificate(d, kv, tc)
       | ViewTimerFired(v) => on_view_timer_fired(d, kv, v)
       | LockTimerFired(v) => on_lock_timer_fired(d, kv, v)
-      | BlockSynced(_) => driver_no_change(d, kv)
+      | BlockSynced(block) => on_block_synced(d, kv, block)
     }
 
   pure def driver_no_change(d: Driver, kv: KVStorage): DriverResult =
@@ -119,6 +119,14 @@ module driver {
       val processed = handle_pacemaker_result(d, kv, called)
       val handled = call_proposal_or_buffer(processed.driver, processed.kv, signed)
       merge_results(processed, handled)
+
+  pure def on_block_synced(d: Driver, kv: KVStorage, block: Block): DriverResult =
+    if (block.parent != block.justify.block or not(is_valid_qc(block.justify)))
+      driver_no_change(d, kv)
+    else
+      val updated = call_update_locked(d, kv, block)
+      val called = call_pacemaker(updated.driver, ReceivedQC(block.justify))
+      handle_pacemaker_result(updated.driver, updated.kv, called)
 
   pure def call_proposal_qc_processed(d: Driver, kv: KVStorage, proposal: Proposal): DriverResult =
     val processed = call_consensus(d, kv, ReceivedProposal(proposal))

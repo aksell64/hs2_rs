@@ -13,7 +13,7 @@ use crate::timer::service::TimerCommand;
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
 use crate::types::certificate::{SignedVote, SignedWish, TimeoutQC};
-use crate::types::clock::{Clock, Source};
+use crate::types::clock::{Clock, ClockSource};
 use crate::types::crypto::Notary;
 use crate::types::mempool::Mempool;
 use crate::types::vote::Vote;
@@ -89,26 +89,36 @@ impl<S: Scheme, C: Command> TasksStack<S, C> {
 pub struct Driver<
     S: Scheme,
     C: Command,
-    TP: TimeoutPolicy,
-    TS: Source<Clock = TP::Clock>,
+    TP: TimeoutPolicy<CS::Clock>,
+    CS: ClockSource,
     LP: LeaderPolicy,
 > {
     notary: Notary<S>,
     consensus: Consensus<S>,
-    pacemaker: Pacemaker<S, TP, TS, LP>,
+    pacemaker: Pacemaker<S, TP, CS, LP>,
     collector: Collector<S>,
     pending: BTreeMap<View, Vec<(NodeID, Proposal<S, C>)>>,
 }
 
-impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPolicy>
-    Driver<S, C, TP, TS, LP>
+impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
+    Driver<S, C, TP, CS, LP>
 {
+    pub fn new(notary: Notary<S>, id: NodeID, source: CS, policy: TP, leaders: LP) -> Self {
+        Self {
+            consensus: Consensus::new(notary.clone()),
+            pacemaker: Pacemaker::new(notary.clone(), id, source, policy, leaders),
+            collector: Collector::new(notary.clone()),
+            notary,
+            pending: BTreeMap::new(),
+        }
+    }
+
     pub fn apply<DB: ReadWriteStorage<S, C>, M: Mempool<C>>(
         &mut self,
         storage: &mut DB,
         mempool: &mut M,
         evt: DriverInput<S, C>,
-    ) -> Result<DriverResult<S, C, TP::Clock>, KVError> {
+    ) -> Result<DriverResult<S, C, CS::Clock>, KVError> {
         let stack = self.prepare_tasks_from_event(evt);
         self.apply_nested(storage, mempool, stack)
     }
@@ -137,8 +147,21 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
             DriverInput::LockTimerFired(view) => {
                 vec![Task::Pacemaker(PacemakerInput::LockTimerExpired(view))]
             }
-            DriverInput::BlockSynced(_) => vec![],
+            DriverInput::BlockSynced(block) => self.tasks_from_synced_block(block),
         }
+    }
+
+    fn tasks_from_synced_block(&self, block: Block<S, C>) -> Vec<Task<S, C>> {
+        if block.parent != block.justify.block()
+            || !self.notary.verify_block_hash(&block)
+            || !self.notary.verify_qc(&block.justify)
+        {
+            return vec![];
+        }
+        let justify = block.justify.clone();
+        let mut tasks = Self::store_and_update(block);
+        tasks.push(Task::Pacemaker(PacemakerInput::ReceivedQC(justify)));
+        tasks
     }
 
     fn tasks_from_new_proposal(&self, sender: NodeID, proposal: Proposal<S, C>) -> Vec<Task<S, C>> {
@@ -182,7 +205,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
         storage: &mut DB,
         mempool: &mut M,
         mut stack: TasksStack<S, C>,
-    ) -> Result<DriverResult<S, C, TP::Clock>, KVError> {
+    ) -> Result<DriverResult<S, C, CS::Clock>, KVError> {
         let mut result = DriverResult {
             net: Vec::new(),
             timers: Vec::new(),
@@ -201,7 +224,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
         &mut self,
         storage: &mut DB,
         task: Task<S, C>,
-        result: &mut DriverResult<S, C, TP::Clock>,
+        result: &mut DriverResult<S, C, CS::Clock>,
     ) -> TaskApply<S, C> {
         match task {
             Task::Pacemaker(input) => self.call_pacemaker(storage, input, result),
@@ -226,7 +249,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
         &mut self,
         storage: &mut DB,
         input: PacemakerInput<S>,
-        result: &mut DriverResult<S, C, TP::Clock>,
+        result: &mut DriverResult<S, C, CS::Clock>,
     ) -> TaskApply<S, C> {
         let old_view = storage.get_cur_view()?;
         let called = self.pacemaker.apply(storage, input)?;
@@ -278,7 +301,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
     fn commit_blocks<DB: ReadWriteStorage<S, C>>(
         storage: &mut DB,
         blocks: Vec<Block<S, C>>,
-        result: &mut DriverResult<S, C, TP::Clock>,
+        result: &mut DriverResult<S, C, CS::Clock>,
     ) -> TaskApply<S, C> {
         for block in blocks {
             storage.commit_block(&block)?;
@@ -291,7 +314,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
         &mut self,
         mempool: &mut M,
         output: TaskOut<S, C>,
-        result: &mut DriverResult<S, C, TP::Clock>,
+        result: &mut DriverResult<S, C, CS::Clock>,
     ) -> Vec<Task<S, C>> {
         match output {
             TaskOut::Pacemaker(out) => self.process_pacemaker_out(mempool, out, result),
@@ -300,7 +323,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
         }
     }
 
-    fn release_pending(&mut self, view: View, result: &mut DriverResult<S, C, TP::Clock>) {
+    fn release_pending(&mut self, view: View, result: &mut DriverResult<S, C, CS::Clock>) {
         let released = self.pending.remove(&view).unwrap_or_default();
         result
             .out
@@ -313,7 +336,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
         &mut self,
         mempool: &mut M,
         pacemaker_out: PacemakerOutput,
-        _: &mut DriverResult<S, C, TP::Clock>,
+        _: &mut DriverResult<S, C, CS::Clock>,
     ) -> Vec<Task<S, C>> {
         match pacemaker_out {
             PacemakerOutput::ProposeNow(view) => {
@@ -327,7 +350,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
     fn process_consensus_out(
         &mut self,
         consensus_out: ConsensusOutput<S, C>,
-        _: &mut DriverResult<S, C, TP::Clock>,
+        _: &mut DriverResult<S, C, CS::Clock>,
     ) -> Vec<Task<S, C>> {
         match consensus_out {
             ConsensusOutput::ConfirmVote { vote, block } => self.on_confirm_vote(vote, block),
@@ -362,7 +385,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP
     fn process_collector_out(
         &mut self,
         collector_out: CollectorOutput<S>,
-        _: &mut DriverResult<S, C, TP::Clock>,
+        _: &mut DriverResult<S, C, CS::Clock>,
     ) -> Vec<Task<S, C>> {
         match collector_out {
             CollectorOutput::GenericOutput(GenericCollectorOutput::Ready(qc)) => {
