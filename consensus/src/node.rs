@@ -31,7 +31,6 @@ impl<C> Client<C> {
     }
 }
 
-
 pub struct Node<
     S: Scheme,
     C: Command,
@@ -102,7 +101,8 @@ impl<
 
     pub async fn run(mut self) -> Result<(), NodeError> {
         loop {
-            self.apply_state()?;
+            let effects = self.state.apply()?;
+            self.execute_effects(effects);
 
             tokio::select! {
                 Some(cmd) = self.cmd_ch.recv() => {
@@ -133,13 +133,6 @@ impl<
                 }
             }
         }
-    }
-
-    fn apply_state(&mut self) -> Result<(), NodeError> {
-        while let Some(effects) = self.state.apply()? {
-            self.execute_effects(effects);
-        }
-        Ok(())
     }
 
     fn execute_effects(&mut self, effects: Effects<S, C, CS::Clock>) {

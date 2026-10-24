@@ -1,3 +1,5 @@
+pub mod simulator;
+
 use hotstuff_consensus::mocks::blocksync::NoBlockSync;
 use hotstuff_consensus::mocks::genesis::genesis_config;
 use hotstuff_consensus::mocks::kv::MemoryKV;
@@ -7,8 +9,8 @@ use hotstuff_consensus::mocks::output::{CommitLog, TestOutput};
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestScheme};
 use hotstuff_consensus::mocks::timeouts::FixedPolicy;
 use hotstuff_consensus::node::Node;
-use hotstuff_consensus::sm::NodeError;
 use hotstuff_consensus::protocol::leaders::RoundRobin;
+use hotstuff_consensus::sm::NodeError;
 use hotstuff_consensus::storage::kv_storage::KVStorage;
 use hotstuff_consensus::timer::service::{TokioSource, TokioTimerService};
 use hotstuff_types::node::NodeID;
@@ -56,7 +58,11 @@ fn spawn_cluster(n: u32) -> Cluster {
 
 fn snapshot(logs: &[CommitLog]) -> Vec<Vec<TestCommand>> {
     logs.iter()
-        .map(|log| log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone())
+        .map(|log| {
+            log.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        })
         .collect()
 }
 
@@ -66,8 +72,15 @@ async fn wait_for_commits(logs: &[CommitLog], commits: usize) {
     }
 }
 
-async fn run_until_commits(cluster: Cluster, commits: usize, limit: Duration) -> Vec<Vec<TestCommand>> {
-    if timeout(limit, wait_for_commits(&cluster.logs, commits)).await.is_err() {
+async fn run_until_commits(
+    cluster: Cluster,
+    commits: usize,
+    limit: Duration,
+) -> Vec<Vec<TestCommand>> {
+    if timeout(limit, wait_for_commits(&cluster.logs, commits))
+        .await
+        .is_err()
+    {
         for handle in cluster.handles {
             if handle.is_finished() {
                 panic!("a node stopped: {:?}", handle.await);
@@ -87,7 +100,11 @@ fn assert_consistent(logs: &[Vec<TestCommand>]) {
     for log in logs {
         assert_eq!(log[..shortest], logs[0][..shortest]);
         let unique: BTreeSet<u64> = log.iter().map(|cmd| cmd.0).collect();
-        assert_eq!(unique.len(), log.len(), "a command is committed twice: {log:?}");
+        assert_eq!(
+            unique.len(),
+            log.len(),
+            "a command is committed twice: {log:?}"
+        );
     }
 }
 

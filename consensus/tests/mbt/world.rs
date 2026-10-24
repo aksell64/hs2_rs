@@ -148,7 +148,7 @@ impl World {
         if let Some((sender, bytes)) = self.inbox.get_mut(&id).and_then(VecDeque::pop_front) {
             node.add_event_to_queue(decode(&bytes)?.into_event(sender));
         }
-        let Some(effects) = node.apply()? else {
+        let Some(effects) = node.apply_next()? else {
             return Ok(());
         };
         let timers = self.timers.get_mut(&id).context("node is not running")?;

@@ -58,6 +58,24 @@ pub struct Effects<S: Scheme, C: Command, CL: Clock> {
     pub committed: Vec<Block<S, C>>,
 }
 
+impl<S: Scheme, C: Command, CL: Clock> Effects<S, C, CL> {
+    fn new() -> Self {
+        Self {
+            net: Vec::default(),
+            timers: Vec::default(),
+            sync: Vec::default(),
+            committed: Vec::default(),
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.net.extend(other.net);
+        self.timers.extend(other.timers);
+        self.sync.extend(other.sync);
+        self.committed.extend(other.committed);
+    }
+}
+
 pub struct NodeState<
     S: Scheme,
     C: Command,
@@ -131,7 +149,15 @@ impl<
         &self.db
     }
 
-    pub fn apply(&mut self) -> Result<Option<Effects<S, C, CS::Clock>>, KVError> {
+    pub fn apply(&mut self) -> Result<Effects<S, C, CS::Clock>, NodeError> {
+        let mut effects = Effects::new();
+        while let Some(new_effects) = self.apply_next()? {
+            effects.merge(new_effects);
+        }
+        Ok(effects)
+    }
+
+    pub fn apply_next(&mut self) -> Result<Option<Effects<S, C, CS::Clock>>, KVError> {
         let Some(event) = self.queue.pop_front() else {
             return Ok(None);
         };
