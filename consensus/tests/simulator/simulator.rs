@@ -1,5 +1,9 @@
-use crate::simulator::clock::Timeline;
-use anyhow::{Context, Result, anyhow};
+use crate::simulator::adversary::{
+    Adversary, DeliveryContext, DeliveryPolicy, Fate, Packet, Payload,
+};
+use crate::simulator::clock::{TieBreak, Timeline};
+use crate::simulator::trace::{Trace, describe, node};
+use anyhow::{Result, anyhow};
 use codec::{DecodeAll, Encode};
 use hotstuff_consensus::mocks::kv::MemoryKV;
 use hotstuff_consensus::mocks::mempool::TestMempool;
@@ -19,7 +23,7 @@ use hotstuff_consensus::types::block::Block;
 use hotstuff_consensus::types::clock::{Clock, ClockSource};
 use hotstuff_types::node::NodeID;
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
+use std::fmt::Debug;
 
 pub type Replica<CS> = NodeState<
     TestScheme,
@@ -32,6 +36,9 @@ pub type Replica<CS> = NodeState<
 >;
 
 pub enum Event {
+    Start {
+        node_id: NodeID,
+    },
     Deliver {
         from: NodeID,
         to: NodeID,
@@ -59,6 +66,7 @@ pub struct Commit<CL> {
 
 pub struct GlobalState<CS: ClockSource> {
     nodes: BTreeMap<NodeID, Replica<CS>>,
+    dormant: BTreeMap<NodeID, Replica<CS>>,
     timeline: Timeline<CS::Clock>,
     timers: BTreeMap<NodeID, TimerQueue<CS::Clock>>,
     stable_net_delay: <<CS as ClockSource>::Clock as Clock>::Duration,
@@ -90,41 +98,57 @@ impl<CS: ClockSource> GlobalState<CS> {
     pub fn view_timeouts(&self) -> u64 {
         self.view_timeouts
     }
+
+    pub fn stable_net_delay(&self) -> Duration<CS> {
+        self.stable_net_delay
+    }
+
+    pub fn next_time(&self) -> Option<CS::Clock> {
+        self.timers
+            .values()
+            .filter_map(TimerQueue::next_deadline)
+            .chain(self.timeline.next_time())
+            .min()
+    }
 }
 
 pub type Duration<CS> = <<CS as ClockSource>::Clock as Clock>::Duration;
 
 pub struct Simulator<CS: ClockSource> {
     state: GlobalState<CS>,
+    trace: Option<Trace>,
 }
 
-impl<CS: ManualClock> Simulator<CS> {
+impl<CS: ManualClock> Simulator<CS>
+where
+    CS::Clock: Debug,
+{
     pub fn new(
         clock: CS,
         nodes: BTreeMap<NodeID, Replica<CS>>,
+        starts: BTreeMap<NodeID, CS::Clock>,
         stable_net_delay: Duration<CS>,
-    ) -> Result<Self> {
-        let timers = nodes.keys().map(|id| (*id, TimerQueue::new())).collect();
-        let mut sim = Self {
+        tie_break: TieBreak,
+        trace: Option<Trace>,
+    ) -> Self {
+        let mut timeline = Timeline::new(clock.now(), tie_break);
+        for node_id in nodes.keys().copied() {
+            let at = starts.get(&node_id).copied().unwrap_or(clock.now());
+            timeline.add_event(Event::Start { node_id }, at);
+        }
+        Self {
             state: GlobalState {
-                timeline: Timeline::new(clock.now()),
-                nodes,
-                timers,
+                nodes: BTreeMap::new(),
+                dormant: nodes,
+                timeline,
+                timers: BTreeMap::new(),
                 stable_net_delay,
                 clock,
                 commits: BTreeMap::new(),
                 view_timeouts: 0,
             },
-        };
-        let stable = FixedDelayDeliveryPolicyBuilder::new();
-        let now = sim.state.now();
-        let ids: Vec<NodeID> = sim.state.running().collect();
-        for node_id in ids {
-            let effects = sim.state.nodes.get_mut(&node_id).context("node is not running")?.apply()?;
-            let mut policy = stable.policy_from_state(&sim.state);
-            sim.execute_effects(now, node_id, effects, &mut policy)?;
+            trace,
         }
-        Ok(sim)
     }
 
     pub fn state(&self) -> &GlobalState<CS> {
@@ -133,56 +157,55 @@ impl<CS: ManualClock> Simulator<CS> {
 
     pub fn crash(&mut self, node_id: NodeID) {
         self.state.nodes.remove(&node_id);
+        self.state.dormant.remove(&node_id);
         self.state.timers.remove(&node_id);
     }
 }
 
-impl<CS: ManualClock> Simulator<CS> {
-    fn next_event(&mut self) -> Option<Event> {
-        match (self.next_timer_deadline(), self.state.timeline.next_time()) {
-            (Some(deadline), next) if next.is_none_or(|at| deadline < at) => {
-                self.state.timeline.advance_to(deadline);
-                let (node_id, timer) = self
-                    .pop_due_timer(deadline)
-                    .expect("a timer is due at the earliest deadline");
-                Some(Event::Timer { node_id, timer })
-            }
-            _ => self.state.timeline.fire_next_event(),
-        }
-    }
-
-    fn next_timer_deadline(&self) -> Option<CS::Clock> {
-        self.state
-            .timers
-            .values()
-            .filter_map(TimerQueue::next_deadline)
-            .min()
-    }
-
-    fn pop_due_timer(&mut self, now: CS::Clock) -> Option<(NodeID, TimerEvent)> {
-        self.state
-            .timers
-            .iter_mut()
-            .find_map(|(id, timers)| timers.pop_due(now).map(|timer| (*id, timer)))
-    }
-
-    pub fn next_time(&self) -> Option<CS::Clock> {
-        self.next_timer_deadline()
-            .into_iter()
-            .chain(self.state.timeline.next_time())
-            .min()
-    }
-
-    pub fn tick<DPB: DeliveryPolicyBuilder<CS>>(
+impl<CS: ManualClock> Simulator<CS>
+where
+    CS::Clock: Debug,
+{
+    pub fn tick<DP: DeliveryPolicy<CS>>(
         &mut self,
-        delivery_builder: &mut DPB,
+        adversary: &mut Adversary<CS, DP>,
     ) -> Result<bool> {
         let Some((node_id, now, effects)) = self.advance_next_time()? else {
             return Ok(false);
         };
-        let mut policy = delivery_builder.policy_from_state(&self.state);
-        self.execute_effects(now, node_id, effects, &mut policy)?;
+        self.execute_effects(now, node_id, effects, &mut adversary.delivery)?;
         Ok(true)
+    }
+
+    fn next_event(&mut self) -> Option<Event> {
+        let at = self.state.next_time()?;
+        self.state.timeline.advance_to(at);
+        let due: Vec<NodeID> = self
+            .state
+            .timers
+            .iter()
+            .filter(|(_, timers)| {
+                timers
+                    .next_deadline()
+                    .is_some_and(|deadline| deadline <= at)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let pending = self.state.timeline.pending(at);
+        let pick = self.state.timeline.choose(pending + due.len());
+        match pick.checked_sub(pending) {
+            None => self.state.timeline.take(at, pick),
+            Some(index) => {
+                let node_id = due[index];
+                let timer = self
+                    .state
+                    .timers
+                    .get_mut(&node_id)
+                    .and_then(|timers| timers.pop_due(at))
+                    .expect("a timer is due at the earliest deadline");
+                Some(Event::Timer { node_id, timer })
+            }
+        }
     }
 
     fn advance_next_time(
@@ -200,22 +223,33 @@ impl<CS: ManualClock> Simulator<CS> {
         let now = self.state.timeline.now();
         self.state.clock.set(now);
 
-        let (node_id, inputs) = match event {
+        let traced = self.trace.is_some();
+        let (node_id, inputs, label) = match event {
+            Event::Start { node_id } => {
+                if let Some(replica) = self.state.dormant.remove(&node_id) {
+                    self.state.nodes.insert(node_id, replica);
+                    self.state.timers.insert(node_id, TimerQueue::new());
+                }
+                (node_id, Vec::new(), traced.then(|| "start".to_owned()))
+            }
             Event::Deliver { from, to, bytes } => {
                 let msg = Message::<TestScheme, TestCommand>::decode_all(&mut &bytes[..])
                     .map_err(|err| anyhow!("undecodable message from {from:?}: {err:?}"))?;
-                (to, vec![msg.into_event(from)])
+                let label = traced.then(|| format!("{} from {}", describe(&msg), node(from)));
+                (to, vec![msg.into_event(from)], label)
             }
             Event::Synced { node_id, blocks } => {
+                let label = traced.then(|| format!("synced {} blocks", blocks.len()));
                 let mut inputs = Vec::with_capacity(blocks.len());
                 for bytes in blocks {
                     let block = Block::<TestScheme, TestCommand>::decode_all(&mut &bytes[..])
                         .map_err(|err| anyhow!("undecodable block: {err:?}"))?;
                     inputs.push(DriverInput::BlockSynced(block));
                 }
-                (node_id, inputs)
+                (node_id, inputs, label)
             }
             Event::Timer { node_id, timer } => {
+                let label = traced.then(|| format!("**{timer:?}**"));
                 let input = match timer {
                     TimerEvent::ViewTimeout(view) => {
                         self.state.view_timeouts += 1;
@@ -223,7 +257,7 @@ impl<CS: ManualClock> Simulator<CS> {
                     }
                     TimerEvent::LockTimeout(view) => DriverInput::LockTimerFired(view),
                 };
-                (node_id, vec![input])
+                (node_id, vec![input], label)
             }
         };
 
@@ -241,6 +275,9 @@ impl<CS: ManualClock> Simulator<CS> {
                 committed: Vec::new(),
             },
         };
+        if let (Some(trace), Some(label)) = (&mut self.trace, label) {
+            trace.step(now, node_id, &label, &effects)?;
+        }
         Ok(Some((node_id, now, effects)))
     }
 
@@ -254,7 +291,17 @@ impl<CS: ManualClock> Simulator<CS> {
         for envelope in effects.net {
             let bytes = envelope.msg.encode();
             let recipients: Vec<NodeID> = match envelope.to {
-                Recipient::All => self.state.nodes.keys().copied().collect(),
+                Recipient::All => {
+                    let mut all: Vec<NodeID> = self
+                        .state
+                        .nodes
+                        .keys()
+                        .chain(self.state.dormant.keys())
+                        .copied()
+                        .collect();
+                    all.sort();
+                    all
+                }
                 Recipient::Node(to) => vec![to],
             };
             for to in recipients {
@@ -355,95 +402,5 @@ impl<CS: ManualClock> Simulator<CS> {
         }
         branch.reverse();
         branch
-    }
-}
-
-pub enum Payload<'a> {
-    Message {
-        from: NodeID,
-        msg: &'a Message<TestScheme, TestCommand>,
-    },
-    Sync {
-        digest: &'a TestDigest,
-    },
-}
-
-pub struct Packet<'a> {
-    pub to: NodeID,
-    pub payload: Payload<'a>,
-}
-
-pub enum Fate<D> {
-    Delay(D),
-    Drop,
-}
-
-pub struct DeliveryContext<'a, CS: ClockSource> {
-    pub now: CS::Clock,
-    pub state: &'a GlobalState<CS>,
-}
-
-pub trait DeliveryPolicyBuilder<CS: ClockSource> {
-    type Policy: DeliveryPolicy<CS>;
-
-    fn policy_from_state(&self, state: &GlobalState<CS>) -> Self::Policy;
-}
-
-impl<CS, F, DP> DeliveryPolicyBuilder<CS> for F
-where
-    CS: ClockSource,
-    F: Fn(&GlobalState<CS>) -> DP,
-    DP: DeliveryPolicy<CS>,
-{
-    type Policy = DP;
-
-    fn policy_from_state(&self, state: &GlobalState<CS>) -> DP {
-        self(state)
-    }
-}
-
-pub struct FixedDelayDeliveryPolicyBuilder<CS: ClockSource> {
-    _phantom: PhantomData<CS>,
-}
-
-impl<CS: ClockSource> FixedDelayDeliveryPolicyBuilder<CS> {
-    pub fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<CS: ClockSource> DeliveryPolicyBuilder<CS> for FixedDelayDeliveryPolicyBuilder<CS> {
-    type Policy = FixedDelay<Duration<CS>>;
-
-    fn policy_from_state(&self, state: &GlobalState<CS>) -> Self::Policy {
-        FixedDelay {
-            delay: state.stable_net_delay.clone(),
-        }
-    }
-}
-
-pub trait DeliveryPolicy<CS: ClockSource> {
-    fn route(&mut self, context: &DeliveryContext<CS>, packet: &Packet) -> Fate<Duration<CS>>;
-}
-
-impl<CS, F> DeliveryPolicy<CS> for F
-where
-    CS: ClockSource,
-    F: FnMut(&DeliveryContext<CS>, &Packet) -> Fate<Duration<CS>>,
-{
-    fn route(&mut self, context: &DeliveryContext<CS>, packet: &Packet) -> Fate<Duration<CS>> {
-        self(context, packet)
-    }
-}
-
-pub struct FixedDelay<D> {
-    pub delay: D,
-}
-
-impl<CS: ClockSource> DeliveryPolicy<CS> for FixedDelay<Duration<CS>> {
-    fn route(&mut self, _: &DeliveryContext<CS>, _: &Packet) -> Fate<Duration<CS>> {
-        Fate::Delay(self.delay)
     }
 }
