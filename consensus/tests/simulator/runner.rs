@@ -1,48 +1,33 @@
 use crate::simulator::adversary::{Adversary, DeliveryPolicy, StableDelay};
-use crate::simulator::dsl::{VirtualClock, all_committed, min_committed_height, time_reached};
 use crate::simulator::simulator::{GlobalState, ManualClock, Simulator};
 use anyhow::{Context as _, Result, bail};
 use hotstuff_types::node::NodeID;
 use std::fmt::Debug;
-use std::mem;
 
 type Invariant<CS> = Box<dyn FnMut(&GlobalState<CS>) -> Result<()>>;
 type Stop<CS> = Box<dyn FnMut(&GlobalState<CS>) -> bool>;
 
-pub struct Runner<CS: ManualClock, DP: DeliveryPolicy<CS>> {
-    sim: Simulator<CS>,
+pub struct Env<CS: ManualClock, DP: DeliveryPolicy<CS>> {
     adversary: Adversary<CS, DP>,
     invariants: Vec<Invariant<CS>>,
     stop: Stop<CS>,
     deadline: Option<CS::Clock>,
 }
 
-fn never<CS: ManualClock>() -> Stop<CS> {
-    Box::new(|_| false)
-}
-
-impl<CS: ManualClock> Runner<CS, StableDelay>
-where
-    CS::Clock: Debug,
-{
-    pub fn new(sim: Simulator<CS>) -> Self {
+impl<CS: ManualClock> Env<CS, StableDelay> {
+    pub fn new() -> Self {
         Self {
-            sim,
             adversary: Adversary::new(),
             invariants: Vec::new(),
-            stop: never(),
+            stop: Box::new(|_| false),
             deadline: None,
         }
     }
 }
 
-impl<CS: ManualClock, DP: DeliveryPolicy<CS>> Runner<CS, DP>
-where
-    CS::Clock: Debug,
-{
-    pub fn adversary<P: DeliveryPolicy<CS>>(self, adversary: Adversary<CS, P>) -> Runner<CS, P> {
-        Runner {
-            sim: self.sim,
+impl<CS: ManualClock, DP: DeliveryPolicy<CS>> Env<CS, DP> {
+    pub fn adversary<P: DeliveryPolicy<CS>>(self, adversary: Adversary<CS, P>) -> Env<CS, P> {
+        Env {
             adversary,
             invariants: self.invariants,
             stop: self.stop,
@@ -67,51 +52,50 @@ where
         self.deadline = Some(deadline);
         self
     }
+}
 
-    pub fn crash(mut self, node_id: NodeID) -> Self {
+pub struct Runner<CS: ManualClock> {
+    sim: Simulator<CS>,
+}
+
+impl<CS: ManualClock> Runner<CS>
+where
+    CS::Clock: Debug,
+{
+    pub fn new(sim: Simulator<CS>) -> Self {
+        Self { sim }
+    }
+
+    pub fn crash(&mut self, node_id: NodeID) {
         self.sim.crash(node_id);
-        self
     }
 
     pub fn state(&self) -> &GlobalState<CS> {
         self.sim.state()
     }
 
-    pub fn run(mut self) -> Result<Self> {
-        let mut stop = mem::replace(&mut self.stop, never());
-        let deadline = self.deadline.take();
-        self.check()?;
-        while !stop(self.sim.state()) {
+    pub fn run<DP: DeliveryPolicy<CS>>(&mut self, mut env: Env<CS, DP>) -> Result<()> {
+        self.check(&mut env.invariants)?;
+        while !(env.stop)(self.sim.state()) {
             let now = self.sim.state().now();
-            match (self.sim.state().next_time(), deadline) {
+            match (self.sim.state().next_time(), env.deadline) {
                 (None, _) => bail!("stalled at {now:?}: no events, no timers"),
                 (Some(at), Some(deadline)) if at > deadline => {
                     bail!("condition not reached by {deadline:?}, now {now:?}")
                 }
                 _ => {}
             }
-            self.sim.tick(&mut self.adversary)?;
-            self.check()?;
-        }
-        Ok(self)
-    }
-
-    fn check(&mut self) -> Result<()> {
-        let state = self.sim.state();
-        for invariant in &mut self.invariants {
-            invariant(state).with_context(|| format!("invariant violated at {:?}", state.now()))?;
+            self.sim.tick(&mut env.adversary)?;
+            self.check(&mut env.invariants)?;
         }
         Ok(())
     }
-}
 
-impl<DP: DeliveryPolicy<VirtualClock>> Runner<VirtualClock, DP> {
-    pub fn progress_after(self, gst: u64, blocks: u64, within: u64) -> Result<Self> {
-        let runner = self.stop_cond(time_reached(gst)).run()?;
-        let height = min_committed_height(runner.state());
-        runner
-            .stop_cond(all_committed(height + blocks))
-            .deadline(gst + within)
-            .run()
+    fn check(&self, invariants: &mut [Invariant<CS>]) -> Result<()> {
+        let state = self.sim.state();
+        for invariant in invariants {
+            invariant(state).with_context(|| format!("invariant violated at {:?}", state.now()))?;
+        }
+        Ok(())
     }
 }

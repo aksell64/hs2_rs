@@ -174,27 +174,3 @@ impl Setup {
         )
     }
 }
-
-pub fn min_committed_height(state: &State) -> u64 {
-    state
-        .running()
-        .map(|id| state.committed_height(id))
-        .min()
-        .unwrap_or(0)
-}
-
-pub fn time_reached(time: u64) -> impl Fn(&State) -> bool {
-    move |state| state.next_time().is_none_or(|at| at > time)
-}
-
-pub fn all_committed(height: u64) -> impl Fn(&State) -> bool {
-    move |state| min_committed_height(state) >= height
-}
-
-pub fn and(a: impl Fn(&State) -> bool, b: impl Fn(&State) -> bool) -> impl Fn(&State) -> bool {
-    move |state| a(state) && b(state)
-}
-
-pub fn or(a: impl Fn(&State) -> bool, b: impl Fn(&State) -> bool) -> impl Fn(&State) -> bool {
-    move |state| a(state) || b(state)
-}
