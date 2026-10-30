@@ -1,3 +1,4 @@
+use crate::simulator::json::JsonTrace;
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestScheme};
 use hotstuff_consensus::network::message::{Message, Recipient};
 use hotstuff_consensus::sm::Effects;
@@ -18,10 +19,11 @@ thread_local! {
 
 pub struct Trace {
     out: BufWriter<File>,
+    pub json: JsonTrace,
 }
 
 impl Trace {
-    pub fn create(setup: &str) -> io::Result<Self> {
+    pub fn create(setup: &str, n: u32, crashed: Vec<u32>) -> io::Result<Self> {
         let test = std::thread::current()
             .name()
             .and_then(|name| name.rsplit("::").next())
@@ -39,7 +41,8 @@ impl Trace {
         writeln!(out, "| t | node | event | effects |")?;
         writeln!(out, "|---:|---|---|---|")?;
         eprintln!("trace: {}", path.display());
-        Ok(Self { out })
+        let json = JsonTrace::new(path.with_extension("json"), &title, setup, n, crashed);
+        Ok(Self { out, json })
     }
 
     pub fn step<CL: Clock + Debug>(
@@ -102,5 +105,13 @@ pub fn describe(msg: &Message<TestScheme, TestCommand>) -> String {
         Message::WishMsg(wish) => format!("Wish(v{})", wish.view()),
         Message::StatusMsg { view, .. } => format!("Status(v{view})"),
         Message::TCMsg(tc) => format!("TC(v{})", tc.view()),
+    }
+}
+
+impl Drop for Trace {
+    fn drop(&mut self) {
+        if let Err(err) = self.json.write() {
+            eprintln!("json trace not written: {err}");
+        }
     }
 }
