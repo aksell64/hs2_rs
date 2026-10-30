@@ -2,5 +2,8 @@
 .idea/
 trace.itf.json
 analisys.md
+trace.html
+trace.shiviz.log
 todo.md
 docs/spec/quint/tools/analyze.py
+__pycache__/

@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HotStuff Trace Viewer</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --fg: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc; --row: #f0efea;
+  --accent: #2f5fd0; --cur: #fff3c4; --changed: #ffe9a8;
+  --k-proposal: #2f5fd0; --k-vote: #1f9d6b; --k-wish: #c77a12; --k-tc: #c2410c; --k-status: #7c5cc4;
+  --k-sync: #0e8aa0; --k-other: #888;
+  --n0: #2f5fd0; --n1: #1f9d6b; --n2: #c2410c; --n3: #7c5cc4; --n4: #b8860b; --n5: #0e8aa0; --n6: #b03a7a;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #1f1f1d; --fg: #e8e7e2; --muted: #9a9993; --line: #34332f; --row: #262623;
+    --accent: #7ea2ff; --cur: #4a3f14; --changed: #5a4a12;
+    --k-proposal: #7ea2ff; --k-vote: #4fd1a0; --k-wish: #f0a948; --k-tc: #ff8a5c; --k-status: #b49cff;
+    --k-sync: #4cc7dc; --k-other: #999;
+    --n0: #7ea2ff; --n1: #4fd1a0; --n2: #ff8a5c; --n3: #b49cff; --n4: #e6c15a; --n5: #4cc7dc; --n6: #f080b8;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --panel: #1f1f1d; --fg: #e8e7e2; --muted: #9a9993; --line: #34332f; --row: #262623;
+  --accent: #7ea2ff; --cur: #4a3f14; --changed: #5a4a12;
+  --k-proposal: #7ea2ff; --k-vote: #4fd1a0; --k-wish: #f0a948; --k-tc: #ff8a5c; --k-status: #b49cff;
+  --k-sync: #4cc7dc; --k-other: #999;
+  --n0: #7ea2ff; --n1: #4fd1a0; --n2: #ff8a5c; --n3: #b49cff; --n4: #e6c15a; --n5: #4cc7dc; --n6: #f080b8;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--fg); font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; display: flex; flex-direction: column; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+header { display: flex; gap: 12px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0; }
+header .meta { color: var(--muted); }
+header .spacer { flex: 1; }
+.controls { display: flex; gap: 8px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.controls input[type=range] { flex: 1; min-width: 160px; }
+button, select, input[type=number] { font: inherit; color: inherit; background: var(--row); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
+button:hover { border-color: var(--accent); }
+input[type=number] { width: 70px; }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); }
+.legend label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+main { flex: 1; display: grid; grid-template-columns: minmax(280px, 38%) 1fr; min-height: 0; }
+#diagram { overflow: auto; border-right: 1px solid var(--line); background: var(--panel); position: relative; }
+#lanes { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 2; height: 24px; }
+#detail { overflow: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.action { font-size: 14px; }
+.action code { background: var(--row); padding: 0 3px; border-radius: 3px; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 10px; background: var(--row); border: 1px solid var(--line); color: var(--muted); font-size: 11px; margin-left: 4px; }
+#tree { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+td { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-word; }
+td.changed { background: var(--changed); }
+.msgs div { padding: 2px 0; }
+.empty { color: var(--muted); }
+svg text { fill: var(--fg); }
+.row-hit { fill: transparent; cursor: pointer; }
+.row-hit:hover { fill: var(--row); }
+.tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; max-width: 520px; z-index: 10; display: none; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+#drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.35); color: #fff; font-size: 18px; z-index: 20; }
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; grid-template-rows: 45vh auto; }
+  #diagram { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>HotStuff trace</h1>
+  <span class="meta" id="meta">no trace loaded</span>
+  <span class="spacer"></span>
+  <label><input type="file" id="file" accept=".json" hidden><button id="open">Open trace…</button></label>
+  <button id="theme" title="Toggle theme">◐</button>
+</header>
+<div class="controls">
+  <button id="first" title="First step (Home)">⏮</button>
+  <button id="prev" title="Previous step (←)">◀</button>
+  <button id="play" title="Play / pause (space)">▶</button>
+  <button id="next" title="Next step (→)">▶|</button>
+  <button id="last" title="Last step (End)">⏭</button>
+  <input type="range" id="slider" min="0" max="0" value="0">
+  <input type="number" id="stepnum" min="0" value="0">
+  <select id="tagsel" title="Jump target for shift+← / shift+→">
+    <option value="qc">new QC</option><option value="commit">commit</option><option value="view">view change</option>
+    <option value="timer">timer</option><option value="faulty">faulty</option><option value="drop">dropped</option><option value="sync">blocksync</option>
+  </select>
+  <button id="tprev" title="Previous tagged step (shift+←)">⇤</button>
+  <button id="tnext" title="Next tagged step (shift+→)">⇥</button>
+  <span class="legend" id="legend"></span>
+</div>
+<main>
+  <section id="diagram"><svg id="lanes"></svg><svg id="chart"></svg></section>
+  <section id="detail">
+    <div class="card"><h2 id="steptitle">Step</h2><div class="action" id="action"></div></div>
+    <div class="card"><h2>Block tree</h2><div id="tree"></div><div class="legend" style="margin-top:6px">
+      bold = certified · dashed = no QC yet · filled = committed by all running nodes · chips: C committed, L lock, H high_qc</div></div>
+    <div class="card"><h2>Messages this step</h2><div class="msgs" id="msgs"></div></div>
+    <div class="card"><h2>Nodes</h2><table id="state"></table></div>
+  </section>
+</main>
+<div class="tip" id="tip"></div>
+<div id="drop">Drop a viewer JSON (tools/viz.py --json)</div>
+<script>
+const EMBEDDED = null;
+
+const KINDS = ['Proposal', 'Vote', 'Wish', 'TC', 'Status', 'BlockRequest', 'BlockResponse'];
+const KIND_VAR = { Proposal: '--k-proposal', Vote: '--k-vote', Wish: '--k-wish', TC: '--k-tc', Status: '--k-status', BlockRequest: '--k-sync', BlockResponse: '--k-sync' };
+const ROW_H = 16, TOP = 8, LEFT = 44;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const md = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const nodeColor = h => `var(--n${h % 7})`;
+const kindColor = k => `var(${KIND_VAR[k] || '--k-other'})`;
+const NS = 'http://www.w3.org/2000/svg';
+
+let D = null, cur = 0, timer = null;
+const hidden = new Set(['self']);
+try { for (const k of JSON.parse(localStorage.getItem('hs-viewer-hidden') || '[]')) hidden.add(k); } catch (e) {}
+
+function el(tag, attrs, parent, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+function load(data) {
+  if (!data || !data.steps) { alert('Not a viewer JSON: run tools/viz.py --json'); return; }
+  D = data;
+  D.byStep = D.steps.map(() => ({ sent: [], recv: [] }));
+  for (const m of D.messages) {
+    D.byStep[m.send].sent.push(m);
+    if (m.recv !== null) D.byStep[m.recv].recv.push(m);
+  }
+  D.qcAt = {};
+  for (const q of D.qcs) (D.qcAt[q.step] = D.qcAt[q.step] || []).push(q);
+  D.blockBy = Object.fromEntries(D.blocks.map(b => [b.hash, b]));
+  const f = D.meta.faulty || [];
+  D.faulty = f;
+  $('meta').textContent = `${D.meta.model} · ${D.meta.source} · ${D.meta.steps} steps · running ${D.meta.running.join(',')}` + (f.length ? ` · ${D.meta.faulty_label || 'faulty'} ${f.join(',')}` : '');
+  $('slider').max = $('stepnum').max = D.steps.length - 1;
+  legend();
+  chart();
+  const m = /step=(\d+)/.exec(location.hash);
+  go(m ? +m[1] : 0, true);
+}
+
+function legend() {
+  const box = $('legend');
+  box.innerHTML = '';
+  const kinds = [...new Set(D.messages.map(m => m.kind))].sort((a, b) => KINDS.indexOf(a) - KINDS.indexOf(b));
+  for (const k of [...kinds, 'self']) {
+    const l = document.createElement('label');
+    l.innerHTML = `<input type="checkbox" ${hidden.has(k) ? '' : 'checked'}>` + (k === 'self' ? '' : `<span class="sw" style="background:${kindColor(k)}"></span>`) + (k === 'self' ? 'to self' : k);
+    l.querySelector('input').onchange = e => {
+      e.target.checked ? hidden.delete(k) : hidden.add(k);
+      try { localStorage.setItem('hs-viewer-hidden', JSON.stringify([...hidden])); } catch (err) {}
+      chart(); highlight();
+    };
+    box.appendChild(l);
+  }
+}
+
+function laneX(h, w) {
+  const hosts = D.meta.hosts;
+  const step = (w - LEFT - 16) / Math.max(1, hosts.length - 1 || 1);
+  return hosts.length === 1 ? LEFT + (w - LEFT) / 2 : LEFT + hosts.indexOf(h) * step;
+}
+const rowY = i => TOP + i * ROW_H + ROW_H / 2;
+
+function chart() {
+  const svg = $('chart'), lanes = $('lanes');
+  const w = Math.max(260, $('diagram').clientWidth - 2);
+  const h = TOP * 2 + D.steps.length * ROW_H;
+  svg.innerHTML = ''; lanes.innerHTML = '';
+  svg.setAttribute('width', w); svg.setAttribute('height', h);
+  lanes.setAttribute('width', w);
+  for (const host of D.meta.hosts) {
+    const x = laneX(host, w);
+    const faulty = D.faulty.includes(host);
+    el('text', { x, y: 16, 'text-anchor': 'middle', 'font-size': 12, 'font-weight': 600, style: `fill:${nodeColor(host)}` }, lanes, `n${host}${faulty ? ` (${D.meta.faulty_label || 'faulty'})` : ''}`);
+  }
+  const bg = el('g', {}, svg);
+  D.curRow = el('rect', { x: 0, width: w, height: ROW_H, style: `fill:var(--cur)` }, bg);
+  for (const host of D.meta.hosts) {
+    const x = laneX(host, w);
+    el('line', { x1: x, x2: x, y1: 0, y2: h, style: 'stroke:var(--line)', 'stroke-dasharray': D.faulty.includes(host) ? '3 3' : '' }, bg);
+  }
+  const rows = el('g', {}, svg);
+  D.steps.forEach((s, i) => {
+    const r = el('rect', { class: 'row-hit', x: 0, y: TOP + i * ROW_H, width: w, height: ROW_H }, rows);
+    r.onclick = () => go(i);
+    if (i % 10 === 0) el('text', { x: 4, y: rowY(i) + 4, 'font-size': 10, style: 'fill:var(--muted)' }, rows, s.time !== undefined ? 't' + s.time : i);
+  });
+  const arrows = el('g', {}, svg);
+  D.arrowEls = [];
+  for (const m of D.messages) {
+    if (hidden.has(m.kind) || (m.from === m.to && hidden.has('self'))) continue;
+    const x1 = laneX(m.from, w), y1 = rowY(m.send);
+    const x2 = laneX(m.to, w), y2 = m.recv === null ? h - TOP : rowY(m.recv);
+    const attrs = { x1, y1, x2, y2, style: `stroke:${kindColor(m.kind)}`, 'stroke-width': 1.2, opacity: .55 };
+    if (m.recv === null) attrs['stroke-dasharray'] = '2 3';
+    if (m.dropped) attrs.opacity = .25;
+    if (m.channel === 'sync') attrs['stroke-dasharray'] = '6 2';
+    const line = el('line', attrs, arrows);
+    if (m.recv !== null) el('circle', { cx: x2, cy: y2, r: 2, style: `fill:${kindColor(m.kind)}`, opacity: .8 }, arrows);
+    const hit = el('line', { x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': 7 }, arrows);
+    hit.onmousemove = e => tip(e, `<b>${esc(m.kind)}</b> n${m.from} → n${m.to} · sent ${m.send} · ${m.dropped ? 'dropped by the network' : m.recv === null ? 'in flight at end' : 'received ' + m.recv}<br><code>${esc(m.text)}</code>`);
+    hit.onmouseleave = untip;
+    hit.onclick = () => go(m.recv === null ? m.send : m.recv);
+    D.arrowEls.push({ m, line });
+  }
+  const marks = el('g', {}, svg);
+  D.steps.forEach((s, i) => {
+    if (i === 0 || s.actor === null || s.actor === undefined) return;
+    const x = laneX(s.actor, w), y = rowY(i);
+    const t = s.tags;
+    let shape;
+    if (t.includes('commit')) shape = el('rect', { x: x - 5, y: y - 5, width: 10, height: 10, transform: `rotate(45 ${x} ${y})`, style: `fill:${nodeColor(s.actor)}` }, marks);
+    else if (t.includes('timer')) shape = el('rect', { x: x - 4, y: y - 4, width: 8, height: 8, style: `fill:var(--panel);stroke:${nodeColor(s.actor)}`, 'stroke-width': 1.5 }, marks);
+    else shape = el('circle', { cx: x, cy: y, r: t.includes('drop') ? 2.5 : 4, style: `fill:${t.includes('drop') ? 'var(--muted)' : nodeColor(s.actor)}` }, marks);
+    shape.style.cursor = 'pointer';
+    shape.onclick = () => go(i);
+    shape.onmousemove = e => tip(e, `<b>${i}</b>${s.time !== undefined ? ' t=' + esc(s.time) : ''} ${esc(s.action)} ${s.tags.map(x => `<span class="tag">${x}</span>`).join('')}<br>${md(s.label)}`);
+    shape.onmouseleave = untip;
+    const prev = D.steps[i - 1].nodes[s.actor], now = s.nodes[s.actor];
+    if (prev && now && prev.view !== now.view) el('text', { x: x + 7, y: y + 4, 'font-size': 10, style: 'fill:var(--muted)' }, marks, `v${now.view}`);
+    if (D.qcAt[i]) el('text', { x: w - 4, y: y + 4, 'font-size': 10, 'text-anchor': 'end', style: 'fill:var(--accent)' }, marks, D.qcAt[i].map(q => `QC b${q.block}@v${q.view}`).join(' '));
+  });
+}
+
+function highlight() {
+  if (!D.curRow) return;
+  D.curRow.setAttribute('y', TOP + cur * ROW_H);
+  for (const { m, line } of D.arrowEls) {
+    const on = m.send === cur || m.recv === cur;
+    line.setAttribute('opacity', on ? 1 : .35);
+    line.setAttribute('stroke-width', on ? 2.4 : 1.2);
+  }
+}
+
+function go(i, scroll) {
+  if (!D) return;
+  cur = Math.max(0, Math.min(D.steps.length - 1, i));
+  $('slider').value = $('stepnum').value = cur;
+  try { history.replaceState(null, '', `#step=${cur}`); } catch (e) {}
+  highlight();
+  detail();
+  const box = $('diagram'), y = TOP + cur * ROW_H;
+  if (scroll || y < box.scrollTop + 30 || y > box.scrollTop + box.clientHeight - 40) box.scrollTop = y - box.clientHeight / 2;
+}
+
+function detail() {
+  const s = D.steps[cur];
+  $('steptitle').textContent = `Step ${cur} / ${D.steps.length - 1}` + (s.time !== undefined ? ` · t = ${s.time}` : '');
+  const qcs = (D.qcAt[cur] || []).filter(() => cur > 0).map(q => `<div>new QC b${q.block}@v${q.view} ${esc(q.signers)}</div>`).join('');
+  $('action').innerHTML = `<div><code>${esc(s.action)}</code>${s.actor !== null && s.actor !== undefined ? ` · n${s.actor}` : ''} ${s.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div><div style="margin-top:4px">${md(s.label)}</div>${qcs}`;
+  tree();
+  msgs();
+  table();
+}
+
+function msgs() {
+  const { sent, recv } = D.byStep[cur];
+  const line = (m, dir) => `<div><span class="sw" style="background:${kindColor(m.kind)}"></span> ${dir} n${m.from} → n${m.to} <code>${esc(m.text)}</code> <span class="empty">${dir === 'sent' ? (m.recv === null ? 'in flight' : 'recv @' + m.recv) : 'sent @' + m.send}</span></div>`;
+  const html = recv.map(m => line(m, 'recv')).join('') + sent.map(m => line(m, 'sent')).join('');
+  $('msgs').innerHTML = html || '<span class="empty">none</span>';
+}
+
+function tree() {
+  const s = D.steps[cur];
+  const blocks = D.blocks.filter(b => b.minted <= cur);
+  const certified = new Set(D.qcs.filter(q => q.step <= cur).map(q => q.block));
+  const running = Object.keys(s.nodes);
+  const kids = {};
+  for (const b of blocks) (kids[b.parent] = kids[b.parent] || []).push(b);
+  for (const k in kids) kids[k].sort((a, b) => a.hash - b.hash);
+  const lane = {};
+  let next = 0;
+  const place = (b, l) => {
+    lane[b.hash] = l;
+    (kids[b.hash] || []).forEach((c, j) => place(c, j === 0 ? l : ++next));
+  };
+  const roots = blocks.filter(b => !D.blockBy[b.parent] || D.blockBy[b.parent].minted > cur);
+  roots.forEach((r, j) => place(r, j === 0 ? 0 : ++next));
+  const BW = 74, BH = 30, GX = 96, GY = 62;
+  const maxH = Math.max(0, ...blocks.map(b => b.height));
+  const svg = document.createElementNS(NS, 'svg');
+  const W = 20 + (maxH + 1) * GX, H = 20 + (next + 1) * GY;
+  svg.setAttribute('width', W); svg.setAttribute('height', H);
+  const pos = b => ({ x: 10 + b.height * GX, y: 10 + lane[b.hash] * GY });
+  for (const b of blocks) {
+    const p = D.blockBy[b.parent];
+    if (!p || lane[p.hash] === undefined) continue;
+    const a = pos(p), c = pos(b);
+    el('path', { d: `M${a.x + BW} ${a.y + BH / 2} C${a.x + BW + 12} ${a.y + BH / 2}, ${c.x - 12} ${c.y + BH / 2}, ${c.x} ${c.y + BH / 2}`, fill: 'none', style: 'stroke:var(--muted)' }, svg);
+    const j = D.blockBy[b.justify.block];
+    if (j && j.hash !== b.parent && lane[j.hash] !== undefined) {
+      const q = pos(j);
+      el('path', { d: `M${q.x + BW / 2} ${q.y} C${q.x + BW / 2} ${q.y - 24}, ${c.x + BW / 2} ${c.y - 24}, ${c.x + BW / 2} ${c.y}`, fill: 'none', style: 'stroke:var(--k-tc)', 'stroke-dasharray': '2 3' }, svg);
+    }
+  }
+  for (const b of blocks) {
+    const { x, y } = pos(b);
+    const all = running.every(k => s.nodes[k].committed.includes(b.hash) || s.nodes[k].exec_hash === b.hash);
+    const cert = certified.has(b.hash);
+    const g = el('g', {}, svg);
+    el('rect', { x, y, width: BW, height: BH, rx: 5, style: `fill:${all ? 'var(--row)' : 'var(--panel)'};stroke:${cert ? 'var(--fg)' : 'var(--muted)'}`, 'stroke-width': cert ? 2 : 1, 'stroke-dasharray': cert ? '' : '4 3' }, g);
+    const n = D.meta.committee_size, spec = !('view' in b);
+    const view = spec ? Math.floor(b.hash / 2 / n) : b.view, prop = spec ? Math.floor(b.hash / 2) % n : b.proposer;
+    el('text', { x: x + 6, y: y + 13, 'font-size': 11, 'font-weight': 600, class: 'mono' }, g, `b${b.hash}${spec && b.hash % 2 ? "'" : ''}`);
+    el('text', { x: x + 6, y: y + 25, 'font-size': 9, style: 'fill:var(--muted)' }, g, b.height === 0 ? 'genesis' : `h${b.height}` + (view !== null ? ` v${view}` : '') + (prop !== null ? ` n${prop}` : ''));
+    let cx = x;
+    for (const k of running) {
+      const n = s.nodes[k];
+      const t = (n.committed.includes(b.hash) || n.exec_hash === b.hash ? 'C' : '') + (n.lock.block === b.hash ? 'L' : '') + (n.high_qc.block === b.hash ? 'H' : '');
+      if (!t) continue;
+      el('text', { x: cx, y: y + BH + 11, 'font-size': 9, 'font-weight': 600, style: `fill:${nodeColor(+k)}` }, g, `${k}${t}`);
+      cx += 8 + t.length * 6;
+    }
+    g.onmousemove = e => tip(e, `<code>b${b.hash}</code> height ${b.height}, parent b${b.parent}, minted @${b.minted}<br>justify QC(b${b.justify.block}@v${b.justify.view} ${esc(b.justify.signers)})${cert ? '' : '<br>no QC yet'}`);
+    g.onmouseleave = untip;
+  }
+  $('tree').innerHTML = '';
+  $('tree').appendChild(svg);
+}
+
+const qcs = q => `b${q.block}@v${q.view} ${q.signers}`;
+const list = a => a === undefined ? null : a.length ? a.join(', ') : '∅';
+const opt = v => v === undefined ? null : v;
+const ROWS = [
+  ['view', n => n.view], ['leader', n => `n${n.leader}`], ['proposed', n => n.proposed],
+  ['high_qc', n => qcs(n.high_qc)], ['qc_lock', n => qcs(n.lock)], ['voted_view', n => n.voted_view],
+  ['exec', n => `h${n.exec_height} b${n.exec_hash}`], ['committed', n => list(n.committed.map(h => 'b' + h))],
+  ['stored', n => list(n.stored.map(h => 'b' + h))],
+  ['view_timers', n => list(n.view_timers)], ['lock_timer', n => n.lock_timer ?? '—'],
+  ['sent_wish', n => list(n.sent_wish)], ['statuses', n => list(n.statuses)], ['relayed_tc', n => list(n.relayed_tc)],
+  ['votes', n => opt(n.votes)], ['wishes', n => opt(n.wishes)],
+  ['pending', n => n.pending ? Object.entries(n.pending).map(([v, xs]) => `v${v}: ${xs.join('; ')}`).join('\n') || '∅' : null],
+  ['queue', n => n.queue ? n.queue.join('\n') || '∅' : null],
+  ['inbox', (n, k, s) => s.inbox ? (s.inbox[k] || []).join('\n') || '∅' : null],
+  ['sync.fetches', n => n.sync ? n.sync.fetches : null], ['sync.buffered', n => n.sync ? list(n.sync.buffered) : null],
+  ['sync.parked', n => n.sync ? list(n.sync.parked) : null],
+  ['sync.counters', n => n.sync ? `delivered ${n.sync.delivered} · retries ${n.sync.retries} · rejected ${n.sync.rejected}` : null],
+];
+
+function table() {
+  const s = D.steps[cur], p = cur > 0 ? D.steps[cur - 1] : null;
+  const ids = Object.keys(s.nodes);
+  let html = '<tr><th></th>' + ids.map(k => `<th style="color:${nodeColor(+k)}">n${k}${+k === s.actor ? ' ●' : ''}</th>`).join('') + '</tr>';
+  for (const [name, get] of ROWS) {
+    const vals = ids.map(k => get(s.nodes[k], k, s));
+    if (vals.every(v => v === null)) continue;
+    html += `<tr><th>${name}</th>` + ids.map((k, j) => {
+      const was = p && p.nodes[k] ? get(p.nodes[k], k, p) : vals[j];
+      return `<td class="${String(was) !== String(vals[j]) ? 'changed' : ''}">${esc(vals[j]).replace(/\n/g, '<br>')}</td>`;
+    }).join('') + '</tr>';
+  }
+  $('state').innerHTML = html;
+}
+
+function tip(e, html) {
+  const t = $('tip');
+  t.innerHTML = html; t.style.display = 'block';
+  const x = Math.min(e.clientX + 14, innerWidth - t.offsetWidth - 8);
+  const y = e.clientY + 14 + t.offsetHeight > innerHeight ? e.clientY - t.offsetHeight - 10 : e.clientY + 14;
+  t.style.left = x + 'px'; t.style.top = y + 'px';
+}
+function untip() { $('tip').style.display = 'none'; }
+
+function jump(dir) {
+  const tag = $('tagsel').value;
+  for (let i = cur + dir; i >= 0 && i < D.steps.length; i += dir) if (D.steps[i].tags.includes(tag)) return go(i);
+}
+function play() {
+  if (timer) { clearInterval(timer); timer = null; $('play').textContent = '▶'; return; }
+  $('play').textContent = '⏸';
+  timer = setInterval(() => { if (cur >= D.steps.length - 1) play(); else go(cur + 1); }, 250);
+}
+
+$('open').onclick = () => $('file').click();
+$('file').onchange = e => e.target.files[0] && e.target.files[0].text().then(t => load(JSON.parse(t)));
+$('slider').oninput = e => go(+e.target.value);
+$('stepnum').onchange = e => go(+e.target.value);
+$('first').onclick = () => go(0);
+$('last').onclick = () => go(D.steps.length - 1);
+$('prev').onclick = () => go(cur - 1);
+$('next').onclick = () => go(cur + 1);
+$('tprev').onclick = () => jump(-1);
+$('tnext').onclick = () => jump(1);
+$('play').onclick = play;
+$('theme').onclick = () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+};
+addEventListener('keydown', e => {
+  if (!D || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 'ArrowLeft') { e.shiftKey ? jump(-1) : go(cur - 1); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { e.shiftKey ? jump(1) : go(cur + 1); e.preventDefault(); }
+  else if (e.key === ' ') { play(); e.preventDefault(); }
+  else if (e.key === 'Home') go(0);
+  else if (e.key === 'End') go(D.steps.length - 1);
+});
+let resizeT;
+addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (D) { chart(); highlight(); } }, 150); });
+addEventListener('dragover', e => { e.preventDefault(); $('drop').style.display = 'flex'; });
+addEventListener('dragleave', e => { if (e.target === $('drop')) $('drop').style.display = 'none'; });
+addEventListener('drop', e => {
+  e.preventDefault(); $('drop').style.display = 'none';
+  const f = e.dataTransfer.files[0];
+  if (f) f.text().then(t => load(JSON.parse(t)));
+});
+if (EMBEDDED) load(EMBEDDED);
+</script>
+</body>
+</html>

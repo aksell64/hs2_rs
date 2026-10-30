@@ -9,6 +9,7 @@ and pick the branch, e.g. the branch of a pull request, or `gh workflow run spec
     make sim                                    # simulation with step_fair, writes trace.itf.json
     make sim MODEL=n4f1v6 MAX_STEPS=500 SAMPLES=300 SEED=0x...
     make analyze                                # trace.itf.json -> analisys.md
+    make viz                                    # trace.itf.json -> trace.html, trace.shiviz.log
 
 `sim` also takes `STEP` and `INVARIANT` (defaults `step_fair`, `safety_inv`).
 
@@ -58,6 +59,25 @@ Renders the trace as markdown:
   (pacemaker, consensus, pending proposals, timers, queue) plus the network; changed values are in bold.
 
 `--from` / `--to` select the steps that are rendered in detail; the summary always covers the whole trace.
+
+### Visualize trace
+
+    python3 tools/viz.py trace.itf.json --html trace.html --shiviz trace.shiviz.log --dot blocks.dot --step 200
+
+- `--html` — a self-contained page (`tools/viewer.html` with the trace inlined); open it in a browser.
+  Left: a time-space diagram, one lane per node, one row per step, arrows from the send to the receive of every
+  message (colored by kind; dashed — still in flight at the end, `faulty` messages go straight from the faulty lane).
+  Right, for the selected step: the action, the block tree (certified blocks bold, per-node chips
+  `C` committed / `L` lock / `H` high_qc), the messages sent and received, and the state of every node with
+  changed cells highlighted. Keys: `←` / `→` step, `shift+←` / `shift+→` previous / next step with the selected tag
+  (new QC, commit, view change, timer, faulty, dropped, blocksync), space plays, `#step=N` in the URL opens a step.
+- `--json` — the same data without the page; the page loads it with "Open trace…" or drag and drop.
+- `--shiviz` — a log for [ShiViz](https://bestchai.bitbucket.io/shiviz/) with vector clocks: paste it with the
+  default parser regex.
+- `--dot` — the block tree at `--step` (default: the last one) for Graphviz: `dot -Tsvg blocks.dot -o blocks.svg`.
+
+The actor of each step comes from `mbt::actionTaken` / `mbt::nondetPicks`, so the trace needs `--mbt`
+(`make sim` passes it). Sends and receives are matched by replaying the FIFO inboxes and the `sync_net` set.
 
 ### Run tests
 
