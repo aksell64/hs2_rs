@@ -8,7 +8,8 @@ the survey of existing approaches is in [reading-list.md](reading-list.md).
 catch-up mode, as in Malachite ValueSync). A node requests a block only when it holds a valid QC for it.
 A QC carries one threshold signature and does not reveal its signers, so peers come from status messages:
 every node periodically announces the height of its highest stored block, and the client asks, one at a time,
-f+1 peers that announced at least the needed height (at least one of them is correct). Responses are verified
+first the author of the block, then f+1 peers that announced at least the needed height (at least one of
+them is correct). Responses are verified
 by hash and delivered to the driver bottom-up as regular inputs.
 
 ---
@@ -214,6 +215,10 @@ The server reads its storage only; it never changes consensus state.
 A QC holds one TBLS signature and does not reveal its signers, so the client picks peers from statuses.
 For a fetch of height `h`:
 
+0. **The author first.** One node is known to have the block if it is correct, without any status:
+   for T1 the sender of the parked proposal (the current leader built on the missing parent), for T2 and T3
+   the leader of `qc.view` (it proposed the missing block). It heads the first round's queue and is not
+   repeated in steps 2–3.
 1. `C = { p != self : statuses[p] >= h }`.
 2. If `|C| >= f+1`: the round queue is `f+1` random peers of `C` in random order. At most `f` statuses are
    Byzantine, so the queue contains at least one correct node that stores a chain up to height `h` or above.
@@ -344,6 +349,7 @@ by `stored_genuine_inv` only if the hash check is also off) and a silent Byzanti
 | block arrives through consensus while a fetch is open | fetch dropped on the next client step; parked proposals released |
 | late response after a retry | stale `id` or peer: dropped; duplicate `BlockSynced` is a no-op in the driver |
 | all f Byzantine candidates asked first | at most f timeouts before a correct candidate is asked |
+| the author is Byzantine | one timeout, then the status-based candidates |
 | Byzantine peers announce huge heights | they enter `C`, but at most f of them; any f+1 of `C` contain a correct node |
 | correct candidate is on another branch at height `h` | `NotFound`, next peer at once |
 | statuses lag behind a fresh block | `StatusRequest`; if still fewer than f+1 candidates, ask `C`, then the committee |
