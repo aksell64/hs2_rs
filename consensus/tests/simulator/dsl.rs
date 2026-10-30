@@ -141,7 +141,10 @@ impl Setup {
             .map_or(TieBreak::Fifo, |seed| TieBreak::Shuffle(SplitMix64::new(seed)));
         let trace = self
             .verbose
-            .then(|| Trace::create(&self.describe(&starts)))
+            .then(|| {
+                let crashed = self.crashed.iter().map(|id| u32::from(*id)).collect();
+                Trace::create(&self.describe(&starts), self.n, crashed)
+            })
             .transpose()?;
         Ok(Simulator::new(
             clock,

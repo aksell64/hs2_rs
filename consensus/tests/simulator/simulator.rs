@@ -2,6 +2,7 @@ use crate::simulator::adversary::{
     Adversary, DeliveryContext, DeliveryPolicy, Fate, Packet, Payload,
 };
 use crate::simulator::clock::{TieBreak, Timeline};
+use crate::simulator::json::NodeSnapshot;
 use crate::simulator::trace::{Trace, describe, node};
 use anyhow::{Result, anyhow};
 use codec::{DecodeAll, Encode};
@@ -43,6 +44,7 @@ pub enum Event {
         from: NodeID,
         to: NodeID,
         bytes: Vec<u8>,
+        trace_id: Option<usize>,
     },
     Synced {
         node_id: NodeID,
@@ -101,6 +103,38 @@ impl<CS: ClockSource> GlobalState<CS> {
 
     pub fn stable_net_delay(&self) -> Duration<CS> {
         self.stable_net_delay
+    }
+
+    fn snapshot(&self, known: &[TestDigest]) -> BTreeMap<NodeID, NodeSnapshot> {
+        let read = "in-memory storage read failed";
+        self.nodes
+            .iter()
+            .map(|(id, replica)| {
+                let db = replica.storage();
+                type R<'a> = &'a dyn ReadStorage<TestScheme, TestCommand>;
+                let db: R = db;
+                let timers = self.timers.get(id);
+                let snapshot = NodeSnapshot {
+                    view: db.get_cur_view().expect(read),
+                    leader: db.get_cur_leader().expect(read),
+                    proposed: db.get_proposed().expect(read),
+                    high_qc: db.get_high_qc().expect(read),
+                    lock: db.get_locked_qc().expect(read),
+                    voted_view: db.get_voted_view().expect(read),
+                    exec_height: db.get_exec_height().expect(read),
+                    exec_hash: db.get_exec_hash().expect(read),
+                    committed: self.commits.get(id).map_or(Vec::new(), |log| log.iter().map(|c| c.hash).collect()),
+                    stored: known
+                        .iter()
+                        .copied()
+                        .filter(|d| db.get_block_by_hash(d).expect(read).is_some())
+                        .collect(),
+                    view_timers: timers.map_or(Vec::new(), |t| t.view_timers().collect()),
+                    lock_timer: timers.and_then(TimerQueue::lock_timer),
+                };
+                (*id, snapshot)
+            })
+            .collect()
     }
 
     pub fn next_time(&self) -> Option<CS::Clock> {
@@ -174,6 +208,9 @@ where
             return Ok(false);
         };
         self.execute_effects(now, node_id, effects, &mut adversary.delivery)?;
+        if let Some(trace) = &mut self.trace {
+            trace.json.end(self.state.snapshot(trace.json.known()));
+        }
         Ok(true)
     }
 
@@ -224,22 +261,30 @@ where
         self.state.clock.set(now);
 
         let traced = self.trace.is_some();
+        let mut received = None;
         let (node_id, inputs, label) = match event {
             Event::Start { node_id } => {
                 if let Some(replica) = self.state.dormant.remove(&node_id) {
                     self.state.nodes.insert(node_id, replica);
                     self.state.timers.insert(node_id, TimerQueue::new());
                 }
-                (node_id, Vec::new(), traced.then(|| "start".to_owned()))
+                (node_id, Vec::new(), traced.then(|| ("start".to_owned(), "start", "start".to_owned())))
             }
-            Event::Deliver { from, to, bytes } => {
+            Event::Deliver { from, to, bytes, trace_id } => {
                 let msg = Message::<TestScheme, TestCommand>::decode_all(&mut &bytes[..])
                     .map_err(|err| anyhow!("undecodable message from {from:?}: {err:?}"))?;
-                let label = traced.then(|| format!("{} from {}", describe(&msg), node(from)));
+                received = trace_id;
+                let label = self.trace.as_mut().map(|trace| {
+                    let text = trace.json.describe(&msg);
+                    (format!("{} from {}", describe(&msg), node(from)), "deliver", format!("{text} from {}", node(from)))
+                });
                 (to, vec![msg.into_event(from)], label)
             }
             Event::Synced { node_id, blocks } => {
-                let label = traced.then(|| format!("synced {} blocks", blocks.len()));
+                let label = traced.then(|| {
+                    let text = format!("synced {} blocks", blocks.len());
+                    (text.clone(), "synced", text)
+                });
                 let mut inputs = Vec::with_capacity(blocks.len());
                 for bytes in blocks {
                     let block = Block::<TestScheme, TestCommand>::decode_all(&mut &bytes[..])
@@ -249,7 +294,11 @@ where
                 (node_id, inputs, label)
             }
             Event::Timer { node_id, timer } => {
-                let label = traced.then(|| format!("**{timer:?}**"));
+                let action = match timer {
+                    TimerEvent::ViewTimeout(_) => "view_timeout",
+                    TimerEvent::LockTimeout(_) => "lock_timeout",
+                };
+                let label = traced.then(|| (format!("**{timer:?}**"), action, format!("**{timer:?}**")));
                 let input = match timer {
                     TimerEvent::ViewTimeout(view) => {
                         self.state.view_timeouts += 1;
@@ -260,6 +309,22 @@ where
                 (node_id, vec![input], label)
             }
         };
+
+        if let (Some(trace), Some((_, action, text))) = (&mut self.trace, &label) {
+            trace.json.begin(format!("{now:?}"), node_id, action, text.clone(), received);
+            if let Some(replica) = self.state.nodes.get(&node_id).filter(|_| *action == "start") {
+                let db: &dyn ReadStorage<TestScheme, TestCommand> = replica.storage();
+                let read = "in-memory storage read failed";
+                if let Some(genesis) = db.get_block_by_hash(&db.get_exec_hash().expect(read)).expect(read) {
+                    trace.json.block(&genesis, None, None);
+                }
+            }
+            for input in &inputs {
+                if let DriverInput::BlockSynced(block) = input {
+                    trace.json.block(block, None, None);
+                }
+            }
+        }
 
         let effects = match self.state.nodes.get_mut(&node_id) {
             Some(replica) => {
@@ -275,7 +340,7 @@ where
                 committed: Vec::new(),
             },
         };
-        if let (Some(trace), Some(label)) = (&mut self.trace, label) {
+        if let (Some(trace), Some((label, _, _))) = (&mut self.trace, label) {
             trace.step(now, node_id, &label, &effects)?;
         }
         Ok(Some((node_id, now, effects)))
@@ -317,11 +382,16 @@ where
                     };
                     self.route(policy, now, &packet)
                 };
+                let trace_id = self
+                    .trace
+                    .as_mut()
+                    .map(|trace| trace.json.send(node_id, to, &envelope.msg, at.is_some()));
                 if let Some(at) = at {
                     let event = Event::Deliver {
                         from: node_id,
                         to,
                         bytes: bytes.clone(),
+                        trace_id,
                     };
                     self.state.timeline.add_event(event, at);
                 }
@@ -338,6 +408,9 @@ where
             }
         }
 
+        if let (Some(trace), false) = (&mut self.trace, effects.sync.is_empty()) {
+            trace.json.sync_requested();
+        }
         for digest in effects.sync {
             let blocks = self.missing_branch(node_id, digest);
             if blocks.is_empty() {

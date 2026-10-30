@@ -18,6 +18,9 @@ Run the test with `--nocapture` to see where the trace is written:
     cargo test -p hotstuff-consensus --features testing --test e2e synchronous_network_commits_without_timeouts -- --nocapture
 
 Each simulator writes a markdown table `t | node | event | effects` to `target/tmp/traces/<test>.md`.
+Next to it goes `<test>.json` for the trace viewer of the spec (`docs/spec/quint/tools/viewer.html`, PR spec-trace-viewer):
+open it with "Open trace…", or inline it into a page with
+`python3 docs/spec/quint/tools/viz.py target/tmp/traces/<test>.json --html <test>.html`.
 A test that builds several simulators, e.g. in a loop over seeds, gets `<test>.md`, `<test>-1.md`,
 `<test>-2.md`, … in build order. A new run overwrites files with the same name and leaves the others, so
 clear the directory to start fresh:
