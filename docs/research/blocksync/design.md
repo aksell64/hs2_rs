@@ -5,9 +5,11 @@ The problem statement, requirements R1–R3 and the consensus interface are in [
 the survey of existing approaches is in [reading-list.md](reading-list.md).
 
 **Summary.** Blocksync is a pull-by-hash protocol that runs in parallel with consensus (no separate
-catch-up mode, as in Malachite ValueSync). A node requests a block only when it holds a valid QC for it,
-and it asks the signers of that QC: at least f+1 of them are correct and store the block with all its
-ancestors. Responses are verified by hash and delivered to the driver bottom-up as regular inputs.
+catch-up mode, as in Malachite ValueSync). A node requests a block only when it holds a valid QC for it.
+A QC carries one threshold signature and does not reveal its signers, so peers come from status messages:
+every node periodically announces the height of its highest stored block, and the client asks, one at a time,
+f+1 peers that announced at least the needed height (at least one of them is correct). Responses are verified
+by hash and delivered to the driver bottom-up as regular inputs.
 
 ---
 
@@ -43,13 +45,15 @@ Every way a node learns about a block it does not have goes through a QC:
 | T2. a new `high_qc` whose block is not stored (Case 2 statuses, QC from a proposal of a later view) | `high_qc.block` | `high_qc` |
 | T3. ancestors of a fetched block | `b.parent` | `b.justify` (same block) |
 
-A QC carries its signers (`QuorumCert(signers)`), 2f+1 of them, at most f Byzantine. A correct node votes
-only for a block it stores together with all its ancestors. Hence:
+A QC is backed by 2f+1 votes, at most f of them Byzantine. A correct node votes only for a block it stores
+together with all its ancestors. Hence:
 
-- **availability:** at least f+1 signers of the QC are correct and can serve the block and all its ancestors;
-- **peer selection for free:** the client knows whom to ask without status gossip;
-- **no pull induction:** a QC cannot be forged (2f+1 signatures), so a Byzantine node cannot make a correct
-  node chase a hash that no correct node has. Without a valid QC, nothing is requested.
+- **availability:** at least f+1 correct nodes store the block and all its ancestors;
+- **no pull induction:** a QC cannot be forged (2f+1 signature shares), so a Byzantine node cannot make a
+  correct node chase a hash that no correct node has. Without a valid QC, nothing is requested.
+
+The QC does not tell *which* nodes these are: it holds one threshold (TBLS) signature recovered from any 2f+1
+shares, with no signer bitmap. Peer selection therefore uses status messages (Section 4.6).
 
 As a consequence, **blocksync only ever delivers certified blocks** (and genesis). Blocks created by a
 Byzantine leader and never certified are not fetched; this matches R3.
@@ -63,11 +67,13 @@ Byzantine leader and never certified are not fetched; this matches R3.
 ```quint
 type SmOutput =
 | NoSmOutput
-| MissingBlock({ qc: CertifiedBlock, parked: List[DriverInput] })   // was MissingBlock(Hash)
+| MissingBlock({ qc: CertifiedBlock, height: Height, parked: List[DriverInput] })   // was MissingBlock(Hash)
 ```
 
-The QC gives both the hash (`qc.block`) and the peers (`qc.certificate.signature`); `parked` carries the
-proposal that waits for the block (T1), empty for T2.
+The QC gives the hash (`qc.block`) and proves that the block exists. `height` is the height of the missing
+block, used to pick peers (Section 4.6): `proposal.block.height - 1` for T1, `low.height - 1` for T3. For T2
+the height is unknown and the client uses a lower bound: its highest stored height plus one. `parked`
+carries the proposal that waits for the block (T1), empty for T2.
 
 ### 3.2. When the state machine emits `MissingBlock`
 
@@ -115,7 +121,13 @@ Blocksync messages go through their own channel, separate from consensus message
 type SyncMessage =
 | BlockRequest({ id: RequestID, hash: Hash, max: int })
 | BlockResponse({ id: RequestID, blocks: List[Block] })   // blocks[0].hash == hash, then ancestors
+| NotFound({ id: RequestID })                              // the server does not store hash
+| SyncStatus({ height: Height })                           // height of the highest stored block
+| StatusRequest                                            // ask for a SyncStatus now
 ```
+
+`SyncStatus` is a separate message from the pacemaker's `StatusMsg`. A request names the block by hash, not
+by height: on the uncommitted tail two certified blocks can share a height.
 
 `max` caps the number of blocks in a response (`MAX_BLOCKS`, a model constant). `RequestID` is
 `(client, hash, attempt)`; it lets the client match a response to the request it actually sent.
@@ -124,9 +136,10 @@ type SyncMessage =
 
 ```quint
 type Fetch = {
-  qc: CertifiedBlock,            // why we fetch: hash + signers
-  tried: Set[NodeID],            // signers already asked in the current round
-  peer: Option[NodeID],          // the signer we are waiting for
+  qc: CertifiedBlock,            // why we fetch: the hash and the proof that the block exists
+  height: Height,                // height of the missing block (exact or lower bound)
+  queue: List[NodeID],           // peers still to ask in the current round (Section 4.6)
+  peer: Option[NodeID],          // the peer we are waiting for
   attempt: int,
   parked: List[DriverInput],     // proposals waiting for this block
 }
@@ -134,17 +147,18 @@ type Fetch = {
 type SyncClient = {
   fetches: Hash -> Fetch,        // one entry per missing hash
   buffered: Hash -> Block,       // verified blocks that do not connect to storage yet
+  statuses: NodeID -> Height,    // highest height announced by each peer, never decreases
 }
 ```
 
 ### 4.3. Client algorithm
 
-**On `MissingBlock(qc)`** (`h = qc.block`):
+**On `MissingBlock(qc, height)`** (`h = qc.block`):
 - `h` already in `fetches`: add the parked proposal, if any, and stop;
 - otherwise create a `Fetch` and send a request (below).
 
-**Send a request:** pick `p ∈ signers(qc) \ tried \ {self}`; if empty, start a new round
-(`tried = {}`). Send `BlockRequest{ id, h, MAX_BLOCKS }` to `p`, set `peer = Some(p)`, add `p` to `tried`.
+**Send a request:** take the next `p` from `queue`; if `queue` is empty, build a new one (Section 4.6).
+Send `BlockRequest{ id, h, MAX_BLOCKS }` to `p` and set `peer = Some(p)`.
 
 **On `BlockResponse{ id, blocks }`** from `p`:
 1. drop it unless `id` matches an open fetch and `p` is its `peer` (unsolicited or stale);
@@ -154,9 +168,13 @@ type SyncClient = {
    - `low.parent` is stored: emit `BlockSynced` for the chain **bottom-up**, then the parked proposals,
      to the front of the node queue; drop the fetch and the buffered chain;
    - otherwise: keep the chain buffered and replace the fetch with one for `low.parent`, using
-     `low.justify` (T3) — its signers are the peers for the next step.
+     `low.justify` (T3) and height `low.height - 1`.
 
-**On timeout of a fetch:** send the request again to the next signer (as above), `attempt + 1`.
+**On `NotFound{ id }`** from `peer`: send the request to the next peer at once, `attempt + 1`.
+
+**On timeout of a fetch:** send the request to the next peer (as above), `attempt + 1`.
+
+**On `SyncStatus{ height }`** from `p`: `statuses[p] = max(statuses[p], height)`.
 
 **On every step:** drop fetches whose hash got stored by other means (e.g. the proposal arrived through
 consensus); release their parked proposals.
@@ -183,9 +201,40 @@ continues from the lowest block (T3).
 **On `BlockRequest{ id, h, max }`** from `c`:
 - if `h` is stored: reply `BlockResponse{ id, [h, parent(h), ...] }` with at most `max` blocks, stopping at
   genesis;
-- otherwise: no reply (the client times out and asks another signer).
+- otherwise: reply `NotFound{ id }`, so the client moves on without waiting for a timeout.
+
+**Statuses:** every `STATUS_INTERVAL`, and on `StatusRequest`, send `SyncStatus{ height }` of the highest
+stored block to all nodes. Because stored blocks always have their ancestors (`stored_ancestry_inv`), a
+correct node with height `H` stores one complete chain up to `H`.
 
 The server reads its storage only; it never changes consensus state.
+
+### 4.6. Peer selection
+
+A QC holds one TBLS signature and does not reveal its signers, so the client picks peers from statuses.
+For a fetch of height `h`:
+
+1. `C = { p != self : statuses[p] >= h }`.
+2. If `|C| >= f+1`: the round queue is `f+1` random peers of `C` in random order. At most `f` statuses are
+   Byzantine, so the queue contains at least one correct node that stores a chain up to height `h` or above.
+3. If `|C| < f+1` (statuses lag behind a fresh block): send `StatusRequest` to all, wait `STATUS_WAIT`,
+   recompute `C`; if it is still smaller than `f+1`, the queue is `C`.
+4. When the queue is exhausted without success, the next round asks the whole committee in random order.
+   This round guarantees termination even with stale or false statuses.
+
+Requests are sent **one at a time**; the client never polls several peers for the same block in parallel,
+so a missing block costs the network one response, not `f+1`.
+
+What the guarantee covers:
+
+- **committed blocks:** heights are unique, so a correct peer with status `>= h` stores the block: at most
+  `f` failed attempts, as with signer-based selection;
+- **uncommitted tail (T1, T2):** a correct peer with status `>= h` may store a different branch at height
+  `h` and answers `NotFound`. Such attempts cost one round trip, not a timeout; in the worst case the client
+  reaches the committee round.
+
+Statuses only choose whom to ask. Every response is still verified (4.4), so a false status can delay a
+fetch but cannot make a node store a wrong block.
 
 ---
 
@@ -209,6 +258,9 @@ flight (the peer had its chance and failed), mirroring `view_timer_ready_fair`. 
 
 The demonstration client (`serve_requests` over the union of all storages) is removed.
 
+**Peer selection in the model.** The Quint model still predates Section 4.6: its QCs carry an explicit
+signer set and the client asks the signers. Statuses, `NotFound` and the committee round are not modeled yet.
+
 **Models.** The existing models set `|FAULTY| = f` (`n4f1v*`, `n7f2v6`), so the correct nodes are exactly a
 quorum: a block that one correct node missed cannot get a QC, and blocksync is never triggered (0 requests in
 100 + 100 traces of `n4f1v20` with `step_fair` and `step`). Blocksync needs models with `|FAULTY| < f` or no
@@ -222,6 +274,7 @@ within the first 100 traces under both steps.
 - **One outstanding request per fetch**, at most `MAX_FETCHES` fetches per node. The number of fetches is
   already bounded by the number of certified blocks the node has heard of (at most one QC per view).
 - **`MAX_BLOCKS` per response** on both sides: the server truncates, the client rejects longer responses.
+- **Statuses:** one `SyncStatus` per node per `STATUS_INTERVAL`; the client keeps one height per peer.
 - **Server side:** at most one request per peer in progress; further requests from the same peer wait or are
   dropped (implementation detail, not modeled).
 - **Buffered chains** are bounded by the lag of the node; above `MAX_BUFFERED` the client drops the buffer and
@@ -263,8 +316,8 @@ than invariants: neither is visible in the state after the step.
 
 ### Liveness (R3)
 
-After GST every fetch terminates: each round tries every signer, at least f+1 of them are correct and store
-the block, and a correct server answers. Quint simulation does not check temporal properties; R3 is
+After GST every fetch terminates: the committee round (4.6) asks every node, at least f+1 of them are
+correct and store the block, and a correct server answers. Quint simulation does not check temporal properties; R3 is
 approximated by `sync_delivery_witness` under `step_fair`, and by `safety_inv` together with commits
 continuing in the models where blocksync is exercised.
 
@@ -290,12 +343,15 @@ by `stored_genuine_inv` only if the hash check is also off) and a silent Byzanti
 |---|---|
 | block arrives through consensus while a fetch is open | fetch dropped on the next client step; parked proposals released |
 | late response after a retry | stale `id` or peer: dropped; duplicate `BlockSynced` is a no-op in the driver |
-| all f Byzantine signers asked first | at most f timeouts before a correct signer is asked |
+| all f Byzantine candidates asked first | at most f timeouts before a correct candidate is asked |
+| Byzantine peers announce huge heights | they enter `C`, but at most f of them; any f+1 of `C` contain a correct node |
+| correct candidate is on another branch at height `h` | `NotFound`, next peer at once |
+| statuses lag behind a fresh block | `StatusRequest`; if still fewer than f+1 candidates, ask `C`, then the committee |
 | synced block's QC raises `high_qc` | the node may advance its view; this is the same as a QC from a proposal |
 | synced block on a dead fork | stored, never committed; harmless (storage GC is a separate topic) |
 | parked proposal of a past view | driver ignores it; if the block was certified, T1/T2 fetch it later |
 | node far behind (chain does not connect within `MAX_BUFFERED`) | phase 2 |
-| server pruned the block | it does not answer; client tries other signers; if all pruned, phase 2 |
+| server pruned the block | `NotFound`; client tries other peers; if all pruned, phase 2 |
 | Byzantine node gossips a fake high QC | impossible to forge 2f+1 signatures; a real QC means the block exists |
 
 ---
@@ -306,8 +362,8 @@ When a node is thousands of blocks behind, walking back by hash costs one round 
 blocks. Phase 2 adds range requests for the **committed** chain, where heights are unique:
 
 - `RangeRequest{ from, to }` → committed blocks with a commit proof for the top one (two consecutive QCs);
-- the client learns the network height from QCs it receives (not from peers' claims), so a Byzantine peer
-  cannot make it chase a fake height;
+- the client learns the network height from QCs it receives and picks servers by `SyncStatus` (4.6);
+  a Byzantine peer cannot make it chase a fake height, because the range must end in a commit proof;
 - still no separate mode: range results enter the driver as `BlockSynced` like everything else.
 
 ---
@@ -317,15 +373,18 @@ blocks. Phase 2 adds range requests for the **committed** chain, where heights a
 **Pros**
 
 - no mode switching: consensus stays the only place where decisions are made (as in Malachite);
-- no status gossip and no trust in peers' claims: peers and availability come from the QC;
-- pull induction is impossible by construction;
-- self-verifying responses; Byzantine servers can only delay, at most f timeouts per step;
+- pull induction is impossible by construction: availability comes from the QC;
+- self-verifying responses; statuses only pick peers, so false statuses and Byzantine servers can only delay;
+- works with TBLS certificates, which hide the signers;
 - small change to consensus: one new driver input handler and the request gate in the state machine.
 
 **Cons**
 
 - slow when far behind (one round trip per `MAX_BLOCKS` blocks) until phase 2;
-- one peer at a time per fetch: latency of up to f timeouts when Byzantine signers are asked first;
+- one peer at a time per fetch: latency of up to f timeouts when Byzantine candidates are asked first;
+- periodic `SyncStatus` broadcast: O(n^2) messages per `STATUS_INTERVAL`;
+- on the uncommitted tail a correct candidate may be on another branch, so more attempts than for committed
+  blocks;
 - buffered chains cost memory proportional to the lag;
 - the parked-proposal path adds state to the state machine.
 
@@ -333,8 +392,9 @@ blocks. Phase 2 adds range requests for the **committed** chain, where heights a
 
 | approach | why not now |
 |---|---|
-| Malachite-style status `{base, top}` + requests by height | heights are not unique on the uncommitted tail; peers' claims must be trusted; reused for phase 2 only |
+| ask the signers of the QC | a TBLS certificate does not reveal its signers |
+| Malachite-style requests by height | heights are not unique on the uncommitted tail; requests stay by hash, statuses are used only to pick peers |
 | separate catch-up mode (CometBFT) | mode-switching conditions are hard to get right and to verify |
-| ask all signers at once | faster, but multiplies load (n requests per missing block); a possible later optimization: ask f+1 at once |
+| ask several peers at once | faster, but multiplies load: f+1 responses for one missing block |
 | state sync / snapshots | too early: needs state roots under commit certificates |
 | separate data availability layer (Narwhal) | an architectural rework |
