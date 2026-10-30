@@ -65,7 +65,10 @@ def node_state(n, sync):
         'view_timers': num_set(n['view_timers']),
         'lock_timer': num(lock_timer) if lock_timer is not None else None,
     }
-    if sync is not None:
+    if sync is not None and 'fetches' not in sync:
+        # older blocksync model without fetches/buffered/parked
+        state['sync'] = {'state': fmt(sync)}
+    elif sync is not None:
         state['sync'] = {
             'fetches': fmt(sync['fetches']),
             'buffered': sorted(num(k) for k, _ in entries(sync['buffered'])),
@@ -130,6 +133,20 @@ def p_sender(p):
     return num(p['sender'])
 
 
+def seen_blocks(state):
+    """`minted` if the model has it, else blocks in storages, inboxes and queues."""
+    minted = var(state, 'minted')
+    if minted is not None:
+        return minted['#set']
+    found = []
+    for n in nodes_of(state).values():
+        found += [b for _, b in entries(n['kv']['block_by_hash'])]
+        found += [x['value']['proposal']['block'] for x in n['queue'] if x.get('tag') == 'NewProposal']
+    for _, packets in entries(var(state, 'net')['inbox']):
+        found += [p['msg']['value']['block'] for p in packets if p['msg']['tag'] == 'ProposalMsg']
+    return found
+
+
 def export(trace, source):
     states = trace['states']
     model = next((v.split('::')[0] for v in trace['vars'] if not v.startswith('mbt::')), '?')
@@ -139,7 +156,7 @@ def export(trace, source):
     steps = []
     hosts = set(running)
     for i, s in enumerate(states):
-        for b in (var(s, 'minted') or {'#set': []})['#set']:
+        for b in seen_blocks(s):
             h = num(b['hash'])
             if h not in blocks:
                 blocks[h] = dict(block(b), minted=i)

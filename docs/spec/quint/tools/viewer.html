@@ -349,9 +349,10 @@ const ROWS = [
   ['pending', n => n.pending ? Object.entries(n.pending).map(([v, xs]) => `v${v}: ${xs.join('; ')}`).join('\n') || '∅' : null],
   ['queue', n => n.queue ? n.queue.join('\n') || '∅' : null],
   ['inbox', (n, k, s) => s.inbox ? (s.inbox[k] || []).join('\n') || '∅' : null],
-  ['sync.fetches', n => n.sync ? n.sync.fetches : null], ['sync.buffered', n => n.sync ? list(n.sync.buffered) : null],
+  ['sync', n => n.sync && n.sync.state !== undefined ? n.sync.state : null],
+  ['sync.fetches', n => n.sync ? opt(n.sync.fetches) : null], ['sync.buffered', n => n.sync ? list(n.sync.buffered) : null],
   ['sync.parked', n => n.sync ? list(n.sync.parked) : null],
-  ['sync.counters', n => n.sync ? `delivered ${n.sync.delivered} · retries ${n.sync.retries} · rejected ${n.sync.rejected}` : null],
+  ['sync.counters', n => n.sync && n.sync.fetches !== undefined ? `delivered ${n.sync.delivered} · retries ${n.sync.retries} · rejected ${n.sync.rejected}` : null],
 ];
 
 function table() {
