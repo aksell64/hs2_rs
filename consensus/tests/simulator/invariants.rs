@@ -8,7 +8,7 @@ pub fn safety() -> impl FnMut(&State) -> Result<()> {
     let mut canonical: BTreeMap<u64, TestDigest> = BTreeMap::new();
     let mut checked: BTreeMap<NodeID, usize> = BTreeMap::new();
     move |state| {
-        for (id, log) in state.commit_logs() {
+        for (id, log) in state.honest_commit_logs() {
             let done = checked.entry(id).or_insert(0);
             for i in *done..log.len() {
                 let commit = &log[i];
@@ -38,6 +38,17 @@ pub fn no_view_timeouts() -> impl FnMut(&State) -> Result<()> {
     |state| {
         ensure!(
             state.view_timeouts() == 0,
+            "{} view timers fired",
+            state.view_timeouts()
+        );
+        Ok(())
+    }
+}
+
+pub fn no_k_view_timeouts(k: u64) -> impl FnMut(&State) -> Result<()> {
+    move |state| {
+        ensure!(
+            state.view_timeouts() <= k,
             "{} view timers fired",
             state.view_timeouts()
         );

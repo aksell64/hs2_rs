@@ -1,24 +1,25 @@
+use crate::simulator::byzantine::{ByzantineContext, ByzantineProxy, Input};
 use crate::simulator::dsl::VirtualClock;
-use crate::simulator::rng::SplitMix64;
-use crate::simulator::simulator::{Duration, GlobalState};
+use crate::simulator::rng::SharedRng;
+use crate::simulator::simulator::{Duration, GlobalState, NodeEffects};
+use anyhow::Result;
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestDigest, TestScheme};
 use hotstuff_consensus::network::message::Message;
 use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::clock::ClockSource;
 use hotstuff_types::node::NodeID;
-use std::collections::BTreeSet;
-use std::marker::PhantomData;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Adversary<CS: ClockSource, D: DeliveryPolicy<CS>> {
     pub delivery: D,
-    _phantom_clock: PhantomData<CS>,
+    pub byzantine: BTreeMap<NodeID, ByzantineProxy<CS>>,
 }
 
 impl<CS: ClockSource> Adversary<CS, StableDelay> {
     pub fn new() -> Self {
         Self {
             delivery: StableDelay,
-            _phantom_clock: PhantomData,
+            byzantine: BTreeMap::new(),
         }
     }
 }
@@ -27,8 +28,22 @@ impl<CS: ClockSource, D: DeliveryPolicy<CS>> Adversary<CS, D> {
     pub fn delivery<P: DeliveryPolicy<CS>>(self, delivery: P) -> Adversary<CS, P> {
         Adversary {
             delivery,
-            _phantom_clock: PhantomData,
+            byzantine: self.byzantine,
         }
+    }
+
+    pub fn byzantine(
+        mut self,
+        id: u32,
+        activate_when: impl FnMut(&GlobalState<CS>) -> bool + 'static,
+        behavior: impl FnMut(&mut ByzantineContext<'_, CS>, Input) -> Result<NodeEffects<CS>> + 'static,
+    ) -> Self {
+        let proxy = ByzantineProxy {
+            activate_when: Box::new(activate_when),
+            behavior: Box::new(behavior),
+        };
+        self.byzantine.insert(NodeID::from(id), proxy);
+        self
     }
 }
 
@@ -143,15 +158,11 @@ pub fn fixed(delay: u64) -> FixedDelay<u64> {
 pub struct Uniform {
     lo: u64,
     hi: u64,
-    rng: SplitMix64,
+    rng: SharedRng,
 }
 
-pub fn uniform(lo: u64, hi: u64, seed: u64) -> Uniform {
-    Uniform {
-        lo,
-        hi,
-        rng: SplitMix64::new(seed),
-    }
+pub fn uniform(lo: u64, hi: u64, rng: SharedRng) -> Uniform {
+    Uniform { lo, hi, rng }
 }
 
 impl DeliveryPolicy<VirtualClock> for Uniform {
@@ -257,14 +268,14 @@ where
 
 pub struct Lossy<P> {
     percent: u64,
-    rng: SplitMix64,
+    rng: SharedRng,
     inner: P,
 }
 
-pub fn lossy<P>(percent: u64, seed: u64, inner: P) -> Lossy<P> {
+pub fn lossy<P>(percent: u64, rng: SharedRng, inner: P) -> Lossy<P> {
     Lossy {
         percent,
-        rng: SplitMix64::new(seed),
+        rng,
         inner,
     }
 }

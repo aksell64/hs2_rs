@@ -1,8 +1,7 @@
-use crate::simulator::clock::TieBreak;
-use crate::simulator::rng::SplitMix64;
+use crate::simulator::rng::{SharedRng, SplitMix64};
 use crate::simulator::simulator::{GlobalState, ManualClock, Simulator};
-use crate::simulator::trace::{Trace, node};
-use anyhow::Result;
+use crate::simulator::trace::{Trace, node, record_violation};
+use anyhow::{Result, bail};
 use hotstuff_consensus::mocks::genesis::genesis_config;
 use hotstuff_consensus::mocks::kv::MemoryKV;
 use hotstuff_consensus::mocks::mempool::TestMempool;
@@ -11,6 +10,7 @@ use hotstuff_consensus::mocks::timeouts::FixedPolicy;
 use hotstuff_consensus::protocol::leaders::RoundRobin;
 use hotstuff_consensus::sm::NodeState;
 use hotstuff_consensus::storage::kv_storage::KVStorage;
+use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::clock::ClockSource;
 use hotstuff_consensus::types::crypto::Notary;
 use hotstuff_types::node::NodeID;
@@ -43,10 +43,11 @@ impl ManualClock for VirtualClock {
 pub struct Setup {
     n: u32,
     crashed: BTreeSet<NodeID>,
+    byzantine: BTreeSet<NodeID>,
     view_timeout: u64,
     lock_timeout: u64,
     delay: u64,
-    shuffle: Option<u64>,
+    rng: SharedRng,
     verbose: bool,
     starts: BTreeMap<NodeID, u64>,
     stagger: Option<(u64, u64)>,
@@ -57,10 +58,11 @@ impl Setup {
         Self {
             n,
             crashed: BTreeSet::new(),
+            byzantine: BTreeSet::new(),
             view_timeout: 100,
             lock_timeout: 30,
             delay: 10,
-            shuffle: None,
+            rng: SharedRng::new(0),
             verbose: false,
             starts: BTreeMap::new(),
             stagger: None,
@@ -69,6 +71,11 @@ impl Setup {
 
     pub fn crashed(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
         self.crashed.extend(ids.into_iter().map(NodeID::from));
+        self
+    }
+
+    pub fn byzantine(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
+        self.byzantine.extend(ids.into_iter().map(NodeID::from));
         self
     }
 
@@ -83,8 +90,8 @@ impl Setup {
         self
     }
 
-    pub fn shuffle(mut self, seed: u64) -> Self {
-        self.shuffle = Some(seed);
+    pub fn rng(mut self, rng: SharedRng) -> Self {
+        self.rng = rng;
         self
     }
 
@@ -97,6 +104,11 @@ impl Setup {
         self.starts
             .extend(starts.into_iter().map(|(id, at)| (NodeID::from(id), at)));
         self
+    }
+
+    pub fn start_in_interval(self, rng: &SharedRng, start: u64, end: u64) -> Self {
+        let n = self.n;
+        self.start_at((0..n).map(|id| (id, rng.range(start, end))))
     }
 
     pub fn stagger(mut self, max: u64, seed: u64) -> Self {
@@ -136,41 +148,87 @@ impl Setup {
                 starts.entry(*id).or_insert_with(|| rng.range(0, max));
             }
         }
-        let tie_break = self
-            .shuffle
-            .map_or(TieBreak::Fifo, |seed| TieBreak::Shuffle(SplitMix64::new(seed)));
         let trace = self
             .verbose
-            .then(|| Trace::create(&self.describe(&starts)))
+            .then(|| Trace::create(&self.describe(&starts), self.n, self.rng.seed()))
             .transpose()?;
         Ok(Simulator::new(
             clock,
             nodes,
             starts,
             self.delay,
-            tie_break,
+            self.rng.clone(),
+            self.byzantine.clone(),
             trace,
         ))
     }
 
     fn describe(&self, starts: &BTreeMap<NodeID, u64>) -> String {
         let crashed: Vec<String> = self.crashed.iter().copied().map(node).collect();
-        let starts: Vec<String> = starts
-            .iter()
-            .filter(|(_, at)| **at > 0)
-            .map(|(id, at)| format!("{}@{at}", node(*id)))
+        let byzantine: Vec<String> = self.byzantine.iter().copied().map(node).collect();
+        let starts: Vec<String> = (0..self.n)
+            .map(NodeID::from)
+            .filter(|id| !self.crashed.contains(id))
+            .map(|id| format!("{}@{}", node(id), starts.get(&id).copied().unwrap_or(0)))
             .collect();
-        let ties = self
-            .shuffle
-            .map_or("fifo".to_owned(), |seed| format!("shuffle (seed {seed})"));
         format!(
-            "n = {}, Δ = {}, view timeout = {}, lock timeout = {}, crashed = [{}], late starts = [{}], ties = {ties}",
+            "n = {}, Δ = {}, view timeout = {}, lock timeout = {}, crashed = [{}], byzantine = [{}], starts = [{}], seed = {}",
             self.n,
             self.delay,
             self.view_timeout,
             self.lock_timeout,
             crashed.join(", "),
-            starts.join(", ")
+            byzantine.join(", "),
+            starts.join(", "),
+            self.rng.seed()
         )
     }
+}
+
+pub fn min_committed_height(state: &State) -> u64 {
+    state
+        .honest_nodes()
+        .map(|id| state.committed_height(id))
+        .min()
+        .unwrap_or(0)
+}
+
+pub fn min_view(state: &State) -> View {
+    state
+        .honest_views()
+        .map(|(_, view)| view)
+        .min()
+        .unwrap_or(0)
+}
+
+pub fn max_view(state: &State) -> View {
+    state
+        .honest_views()
+        .map(|(_, view)| view)
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn time_reached(time: u64) -> impl Fn(&State) -> bool {
+    move |state| state.next_time().is_none_or(|at| at > time)
+}
+
+pub fn random_seeds(count: usize) -> Vec<u64> {
+    let mut rng = SplitMix64::new(0);
+    (0..count).map(|_| rng.next_u64()).collect()
+}
+
+pub fn for_each_seed(seeds: &[u64], test: impl Fn(u64, bool) -> Result<()>) -> Result<()> {
+    for &seed in seeds {
+        if let Err(err) = test(seed, false) {
+            let Err(rerun) = test(seed, true) else {
+                bail!(
+                    "seed {seed} failed, then passed when rerun with a trace: the simulation is not deterministic"
+                );
+            };
+            record_violation(&format!("{rerun:#}"))?;
+            return Err(err.context(format!("seed {seed}")));
+        }
+    }
+    Ok(())
 }

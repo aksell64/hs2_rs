@@ -39,6 +39,7 @@ struct SpecDriver {
 struct SpecConsensus {
     qc_lock: SpecQC,
     voted_view: View,
+    proposed_view: View,
     exec_hash: i64,
     exec_height: u64,
 }
@@ -48,7 +49,6 @@ struct SpecPacemaker {
     high_qc: SpecQC,
     cur_view: View,
     cur_leader: u32,
-    proposed: bool,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -151,6 +151,7 @@ fn project_node(world: &World, id: NodeID, node: &Replica) -> Result<SpecNode> {
             consensus: SpecConsensus {
                 qc_lock: project_qc(world, &db.get_locked_qc()?)?,
                 voted_view: db.get_voted_view()?,
+                proposed_view: db.get_proposed_view()?,
                 exec_hash: world.spec_hash(db.get_exec_hash()?)?,
                 exec_height: db.get_exec_height()?,
             },
@@ -158,7 +159,6 @@ fn project_node(world: &World, id: NodeID, node: &Replica) -> Result<SpecNode> {
                 high_qc: project_qc(world, &db.get_high_qc()?)?,
                 cur_view: db.get_cur_view()?,
                 cur_leader: u32::from(db.get_cur_leader()?),
-                proposed: db.get_proposed()?,
             },
         },
         kv: SpecKv { block_by_hash },

@@ -1,8 +1,10 @@
 use crate::simulator::adversary::{
     Adversary, DeliveryContext, DeliveryPolicy, Fate, Packet, Payload,
 };
-use crate::simulator::clock::{TieBreak, Timeline};
-use crate::simulator::trace::{Trace, describe, node};
+use crate::simulator::byzantine::{ByzantineContext, ByzantineProxy};
+use crate::simulator::clock::Timeline;
+use crate::simulator::rng::SharedRng;
+use crate::simulator::trace::{Snapshot, Trace, describe, node};
 use anyhow::{Result, anyhow};
 use codec::{DecodeAll, Encode};
 use hotstuff_consensus::mocks::kv::MemoryKV;
@@ -22,7 +24,7 @@ use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::block::Block;
 use hotstuff_consensus::types::clock::{Clock, ClockSource};
 use hotstuff_types::node::NodeID;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 pub type Replica<CS> = NodeState<
@@ -34,6 +36,27 @@ pub type Replica<CS> = NodeState<
     CS,
     RoundRobin,
 >;
+
+pub type NodeEffects<CS> = Effects<TestScheme, TestCommand, <CS as ClockSource>::Clock>;
+
+pub fn no_effects<CL: Clock>() -> Effects<TestScheme, TestCommand, CL> {
+    Effects {
+        net: Vec::new(),
+        timers: Vec::new(),
+        sync: Vec::new(),
+        committed: Vec::new(),
+    }
+}
+
+fn merge<CL: Clock>(
+    into: &mut Effects<TestScheme, TestCommand, CL>,
+    other: Effects<TestScheme, TestCommand, CL>,
+) {
+    into.net.extend(other.net);
+    into.timers.extend(other.timers);
+    into.sync.extend(other.sync);
+    into.committed.extend(other.committed);
+}
 
 pub enum Event {
     Start {
@@ -66,13 +89,14 @@ pub struct Commit<CL> {
 
 pub struct GlobalState<CS: ClockSource> {
     nodes: BTreeMap<NodeID, Replica<CS>>,
-    dormant: BTreeMap<NodeID, Replica<CS>>,
+    unstarted: BTreeMap<NodeID, Replica<CS>>,
     timeline: Timeline<CS::Clock>,
     timers: BTreeMap<NodeID, TimerQueue<CS::Clock>>,
     stable_net_delay: <<CS as ClockSource>::Clock as Clock>::Duration,
     clock: CS,
     commits: BTreeMap<NodeID, Vec<Commit<CS::Clock>>>,
     view_timeouts: u64,
+    byzantine: BTreeSet<NodeID>,
 }
 
 impl<CS: ClockSource> GlobalState<CS> {
@@ -84,8 +108,33 @@ impl<CS: ClockSource> GlobalState<CS> {
         self.nodes.keys().copied()
     }
 
-    pub fn commit_logs(&self) -> impl Iterator<Item = (NodeID, &[Commit<CS::Clock>])> {
-        self.commits.iter().map(|(id, log)| (*id, log.as_slice()))
+    pub fn honest_nodes(&self) -> impl Iterator<Item = NodeID> + '_ {
+        self.running().filter(|id| !self.is_byzantine(*id))
+    }
+
+    pub fn is_byzantine(&self, node_id: NodeID) -> bool {
+        self.byzantine.contains(&node_id)
+    }
+
+    pub fn replica(&self, node_id: NodeID) -> Option<&Replica<CS>> {
+        self.nodes.get(&node_id)
+    }
+
+    pub fn honest_commit_logs(&self) -> impl Iterator<Item = (NodeID, &[Commit<CS::Clock>])> {
+        self.commits
+            .iter()
+            .filter(|(id, _)| !self.is_byzantine(**id))
+            .map(|(id, log)| (*id, log.as_slice()))
+    }
+
+    pub fn honest_views(&self) -> impl Iterator<Item = (NodeID, View)> {
+        self.nodes
+            .iter()
+            .filter(|(id, _)| !self.is_byzantine(**id))
+            .map(|(id, node)| {
+                let view = ReadStorage::<TestScheme, TestCommand>::get_cur_view(node.storage());
+                (*id, view.unwrap())
+            })
     }
 
     pub fn committed_height(&self, node_id: NodeID) -> u64 {
@@ -117,6 +166,7 @@ pub type Duration<CS> = <<CS as ClockSource>::Clock as Clock>::Duration;
 pub struct Simulator<CS: ClockSource> {
     state: GlobalState<CS>,
     trace: Option<Trace>,
+    rng: SharedRng,
 }
 
 impl<CS: ManualClock> Simulator<CS>
@@ -128,10 +178,11 @@ where
         nodes: BTreeMap<NodeID, Replica<CS>>,
         starts: BTreeMap<NodeID, CS::Clock>,
         stable_net_delay: Duration<CS>,
-        tie_break: TieBreak,
+        rng: SharedRng,
+        byzantine: BTreeSet<NodeID>,
         trace: Option<Trace>,
     ) -> Self {
-        let mut timeline = Timeline::new(clock.now(), tie_break);
+        let mut timeline = Timeline::new(clock.now());
         for node_id in nodes.keys().copied() {
             let at = starts.get(&node_id).copied().unwrap_or(clock.now());
             timeline.add_event(Event::Start { node_id }, at);
@@ -139,15 +190,17 @@ where
         Self {
             state: GlobalState {
                 nodes: BTreeMap::new(),
-                dormant: nodes,
+                unstarted: nodes,
                 timeline,
                 timers: BTreeMap::new(),
                 stable_net_delay,
                 clock,
                 commits: BTreeMap::new(),
                 view_timeouts: 0,
+                byzantine,
             },
             trace,
+            rng,
         }
     }
 
@@ -157,7 +210,7 @@ where
 
     pub fn crash(&mut self, node_id: NodeID) {
         self.state.nodes.remove(&node_id);
-        self.state.dormant.remove(&node_id);
+        self.state.unstarted.remove(&node_id);
         self.state.timers.remove(&node_id);
     }
 }
@@ -170,7 +223,8 @@ where
         &mut self,
         adversary: &mut Adversary<CS, DP>,
     ) -> Result<bool> {
-        let Some((node_id, now, effects)) = self.advance_next_time()? else {
+        let byzantine = &mut adversary.byzantine;
+        let Some((node_id, now, effects)) = self.advance_next_time(byzantine)? else {
             return Ok(false);
         };
         self.execute_effects(now, node_id, effects, &mut adversary.delivery)?;
@@ -180,7 +234,7 @@ where
     fn next_event(&mut self) -> Option<Event> {
         let at = self.state.next_time()?;
         self.state.timeline.advance_to(at);
-        let due: Vec<NodeID> = self
+        let timer_nodes: Vec<NodeID> = self
             .state
             .timers
             .iter()
@@ -191,25 +245,33 @@ where
             })
             .map(|(id, _)| *id)
             .collect();
-        let pending = self.state.timeline.pending(at);
-        let pick = self.state.timeline.choose(pending + due.len());
-        match pick.checked_sub(pending) {
-            None => self.state.timeline.take(at, pick),
-            Some(index) => {
-                let node_id = due[index];
-                let timer = self
-                    .state
-                    .timers
-                    .get_mut(&node_id)
-                    .and_then(|timers| timers.pop_due(at))
-                    .expect("a timer is due at the earliest deadline");
-                Some(Event::Timer { node_id, timer })
-            }
+
+        let pending_timers = timer_nodes.len();
+        let pending_events = self.state.timeline.pending(at);
+        let candidates = pending_events + pending_timers;
+        let pick = if candidates > 1 {
+            self.rng.range(0, candidates as u64 - 1) as usize
+        } else {
+            0
+        };
+
+        if pick < pending_events {
+            self.state.timeline.take(at, pick)
+        } else {
+            let node_id = timer_nodes[pick - pending_events];
+            let timer = self
+                .state
+                .timers
+                .get_mut(&node_id)
+                .and_then(|timers| timers.pop_due(at))
+                .expect("a timer is due at the earliest deadline");
+            Some(Event::Timer { node_id, timer })
         }
     }
 
     fn advance_next_time(
         &mut self,
+        byzantine: &mut BTreeMap<NodeID, ByzantineProxy<CS>>,
     ) -> Result<
         Option<(
             NodeID,
@@ -224,9 +286,16 @@ where
         self.state.clock.set(now);
 
         let traced = self.trace.is_some();
+        let timeout = match &event {
+            Event::Timer {
+                timer: TimerEvent::ViewTimeout(view),
+                ..
+            } => Some(*view),
+            _ => None,
+        };
         let (node_id, inputs, label) = match event {
             Event::Start { node_id } => {
-                if let Some(replica) = self.state.dormant.remove(&node_id) {
+                if let Some(replica) = self.state.unstarted.remove(&node_id) {
                     self.state.nodes.insert(node_id, replica);
                     self.state.timers.insert(node_id, TimerQueue::new());
                 }
@@ -235,7 +304,8 @@ where
             Event::Deliver { from, to, bytes } => {
                 let msg = Message::<TestScheme, TestCommand>::decode_all(&mut &bytes[..])
                     .map_err(|err| anyhow!("undecodable message from {from:?}: {err:?}"))?;
-                let label = traced.then(|| format!("{} from {}", describe(&msg), node(from)));
+                let label =
+                    traced.then(|| format!("received {} from {}", describe(&msg), node(from)));
                 (to, vec![msg.into_event(from)], label)
             }
             Event::Synced { node_id, blocks } => {
@@ -261,24 +331,85 @@ where
             }
         };
 
-        let effects = match self.state.nodes.get_mut(&node_id) {
-            Some(replica) => {
-                for input in inputs {
-                    replica.add_event_to_queue(input);
-                }
-                replica.apply()?
+        let proxy = byzantine
+            .get_mut(&node_id)
+            .and_then(|proxy| (proxy.activate_when)(&self.state).then_some(proxy));
+        let label = match &proxy {
+            Some(_) => label.map(|label| format!("{label} [byzantine]")),
+            None => label,
+        };
+        let label = if self.state.nodes.contains_key(&node_id) {
+            label
+        } else if self.state.unstarted.contains_key(&node_id) {
+            label.map(|label| format!("{label} [not started]"))
+        } else {
+            label.map(|label| format!("{label} [crashed]"))
+        };
+        if let Some(replica) = self.state.nodes.get_mut(&node_id) {
+            for input in inputs {
+                replica.add_event_to_queue(input);
             }
-            None => Effects {
-                net: Vec::new(),
-                timers: Vec::new(),
-                sync: Vec::new(),
-                committed: Vec::new(),
+        }
+        let effects = match proxy {
+            Some(proxy) => self.apply_byzantine(node_id, proxy)?,
+            None => match self.state.nodes.get_mut(&node_id) {
+                Some(replica) => replica.apply()?,
+                None => no_effects(),
             },
         };
-        if let (Some(trace), Some(label)) = (&mut self.trace, label) {
-            trace.step(now, node_id, &label, &effects)?;
+        if let Some(label) = label {
+            let snapshot = self.snapshot(node_id);
+            if let Some(trace) = &mut self.trace {
+                trace.step(now, node_id, &label, timeout, &effects, snapshot);
+            }
         }
         Ok(Some((node_id, now, effects)))
+    }
+
+    fn snapshot(&self, node_id: NodeID) -> Option<Snapshot> {
+        const READ: &str = "in-memory storage read failed";
+        let storage: &dyn ReadStorage<TestScheme, TestCommand> =
+            self.state.nodes.get(&node_id)?.storage();
+        let high_qc = storage.get_high_qc().expect(READ);
+        let view = storage.get_cur_view().expect(READ);
+        Some(Snapshot {
+            view,
+            high_qc: high_qc.view(),
+            locked: storage.get_locked_qc().expect(READ).view(),
+            exec: storage.get_exec_height().expect(READ),
+            proposed: storage.get_proposed_view().expect(READ) == view,
+            missing_high_qc_block: storage
+                .get_block_by_hash(&high_qc.block())
+                .expect(READ)
+                .is_none(),
+        })
+    }
+
+    fn apply_byzantine(
+        &mut self,
+        node_id: NodeID,
+        proxy: &mut ByzantineProxy<CS>,
+    ) -> Result<NodeEffects<CS>> {
+        let Some(mut replica) = self.state.nodes.remove(&node_id) else {
+            return Ok(no_effects());
+        };
+        let effects = Self::run_behavior(node_id, &mut replica, &self.state, proxy);
+        self.state.nodes.insert(node_id, replica);
+        effects
+    }
+
+    fn run_behavior(
+        node_id: NodeID,
+        replica: &mut Replica<CS>,
+        state: &GlobalState<CS>,
+        proxy: &mut ByzantineProxy<CS>,
+    ) -> Result<NodeEffects<CS>> {
+        let mut effects = no_effects();
+        while let Some(input) = replica.pop_input() {
+            let mut context = ByzantineContext::new(node_id, replica, state);
+            merge(&mut effects, (proxy.behavior)(&mut context, input)?);
+        }
+        Ok(effects)
     }
 
     fn execute_effects<DP: DeliveryPolicy<CS>>(
@@ -296,7 +427,7 @@ where
                         .state
                         .nodes
                         .keys()
-                        .chain(self.state.dormant.keys())
+                        .chain(self.state.unstarted.keys())
                         .copied()
                         .collect();
                     all.sort();
@@ -304,6 +435,7 @@ where
                 }
                 Recipient::Node(to) => vec![to],
             };
+
             for to in recipients {
                 let at = if to == node_id {
                     Some(now)

@@ -149,6 +149,16 @@ impl<
         &self.db
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pop_input(&mut self) -> Option<DriverInput<S, C>> {
+        self.queue.pop_front()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn push_front_input(&mut self, input: DriverInput<S, C>) {
+        self.queue.push_front(input);
+    }
+
     pub fn apply(&mut self) -> Result<Effects<S, C, CS::Clock>, NodeError> {
         let mut effects = Effects::new();
         while let Some(new_effects) = self.apply_next()? {
@@ -161,15 +171,6 @@ impl<
         let Some(event) = self.queue.pop_front() else {
             return Ok(None);
         };
-
-        if let Some(missing) = self.check_missing_parent(&event)? {
-            return Ok(Some(Effects {
-                net: Vec::default(),
-                timers: Vec::default(),
-                sync: vec![missing],
-                committed: Vec::default(),
-            }));
-        }
 
         let mut staged = StagedStorage::new(&self.db);
         let result = self.driver.apply(&mut staged, &mut self.mempool, event)?;
@@ -187,26 +188,9 @@ impl<
         Ok(Some(Effects {
             net: result.net,
             timers: result.timers,
-            sync: Vec::default(),
+            sync: result.sync,
             committed: result.committed,
         }))
-    }
-
-    fn check_missing_parent(
-        &self,
-        input: &DriverInput<S, C>,
-    ) -> Result<Option<S::Digest>, KVError> {
-        match input {
-            DriverInput::NewProposal { proposal, .. } => {
-                let parent_hash = proposal.block.parent;
-                Ok(self
-                    .db
-                    .get_block_by_hash(&parent_hash)?
-                    .is_none()
-                    .then_some(parent_hash))
-            }
-            _ => Ok(None),
-        }
     }
 
     fn process_committed_blocks(&mut self, committed: &[Block<S, C>]) {
@@ -225,7 +209,7 @@ impl<
         batch.update_exec_hash(genesis.hash)?;
         batch.update_cur_view(0)?;
         batch.update_cur_leader(leaders.leader(0))?;
-        batch.update_proposed(false)?;
+        batch.update_proposed_view(0)?;
         db.commit_write_batch(batch)
     }
 }

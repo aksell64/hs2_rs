@@ -119,9 +119,9 @@ def describe(prev, cur):
 
 
 ROWS = [
-    ('pacemaker', ['cur_view', 'cur_leader', 'high_qc', 'proposed', 'statuses', 'sent_wish', 'relayed_tc', 'id']),
-    ('consensus', ['voted_view', 'qc_lock', 'exec_height', 'exec_hash']),
-    ('driver', ['pending']),
+    ('pacemaker', ['cur_view', 'cur_leader', 'high_qc', 'lock_expired', 'statuses', 'sent_wish', 'relayed_tc', 'id']),
+    ('consensus', ['voted_view', 'proposed_view', 'qc_lock', 'exec_height', 'exec_hash']),
+    ('driver', ['pending', 'orphans']),
     ('node', ['view_timers', 'lock_timer', 'queue']),
 ]
 

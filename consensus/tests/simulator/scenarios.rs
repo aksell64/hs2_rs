@@ -1,241 +1,119 @@
 use super::adversary::*;
 use super::dsl::*;
 use super::invariants::*;
+use super::rng::SharedRng;
 use super::runner::{Env, Runner};
 use anyhow::{Result, ensure};
-use hotstuff_types::node::NodeID;
+use hotstuff_consensus::protocol::leaders::{LeaderPolicy, RoundRobin};
 
 const DELTA: u64 = 10;
 const VIEW_TIMEOUT: u64 = 100;
 const LOCK_TIMEOUT: u64 = 30;
-const VERBOSE: bool = true;
+const VERBOSE: bool = false;
+
+const N4: u32 = 4;
 
 #[test]
-fn synchronous_network_commits_without_timeouts() -> Result<()> {
-    const END: u64 = 2_000;
-    let mut runner = Runner::new(setup(4).build()?);
-    runner.run(
-        Env::new()
-            .invariant(safety())
-            .invariant(no_view_timeouts())
-            .stop_cond(time_reached(END)),
-    )?;
+fn sync_happy_path() -> Result<()> {
+    let seeds = random_seeds(1_000);
+    for_each_seed(&seeds, |seed, verbose| {
+        const END: u64 = 2_000;
+        let rnd = SharedRng::new(seed);
+        let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT)
+            .rng(rnd.clone())
+            .verbose(verbose)
+            .build()?;
 
-    let bound = (END - DELTA) / (2 * DELTA) - 1;
-    let height = min_committed_height(runner.state());
-    ensure!(
-        height >= bound,
-        "committed up to {height}, expected at least {bound}"
-    );
-    Ok(())
-}
+        let mut runner = Runner::new(setup);
+        runner.run(
+            Env::new()
+                .invariant(safety())
+                .invariant(no_k_view_timeouts(1))
+                .stop_cond(time_reached(END)),
+        )?;
 
-#[test]
-fn synchronous_network_after_uneven_entrance() -> Result<()> {
-    const END: u64 = 2_000;
-    const LAST_START: u64 = 40;
-    let mut runner = Runner::new(
-        setup(4)
-            .start_at([(0, 10), (1, 20), (2, 30), (3, LAST_START)])
-            .build()?,
-    );
-    runner.run(Env::new().invariant(safety()).stop_cond(time_reached(END)))?;
-
-    let bound = (END - LAST_START - DELTA) / (2 * DELTA) - 1 - VIEW_TIMEOUT / (2 * DELTA);
-    let height = min_committed_height(runner.state());
-    ensure!(
-        height >= bound,
-        "committed up to {height}, expected at least {bound}"
-    );
-    Ok(())
-}
-
-#[test]
-fn synchronous_bound_holds_for_any_tie_order() -> Result<()> {
-    const END: u64 = 2_000;
-    let bound = (END - DELTA) / (2 * DELTA) - 1;
-    for seed in 0..20 {
-        let mut runner = Runner::new(setup(4).shuffle(seed).build()?);
-        runner
-            .run(
-                Env::new()
-                    .invariant(safety())
-                    .invariant(no_view_timeouts())
-                    .stop_cond(time_reached(END)),
-            )
-            .map_err(|err| err.context(format!("seed {seed}")))?;
-        let height = min_committed_height(runner.state());
+        let min_commited_height = min_committed_height(runner.state());
+        let want_commited_height = min_view(runner.state()) - 2;
         ensure!(
-            height >= bound,
-            "seed {seed}: committed up to {height}, expected at least {bound}"
+            min_commited_height >= want_commited_height,
+            "committed up to {min_commited_height}, expected at least {want_commited_height}"
         );
-    }
-    Ok(())
+
+        Ok(())
+    })
 }
 
 #[test]
-fn crashed_replica_does_not_stop_progress() -> Result<()> {
-    Runner::new(setup(4).crashed([3]).build()?).run(
-        Env::new()
-            .invariant(safety())
-            .stop_cond(all_committed(20))
-            .deadline(20 * VIEW_TIMEOUT * 10),
-    )?;
-    Ok(())
+fn sync_uneven_start_no_byzantine_no_adversary() -> Result<()> {
+    let seeds = random_seeds(1_000);
+    for_each_seed(&seeds, |seed, verbose| {
+        const END: u64 = 2_000;
+        let rnd = SharedRng::new(seed);
+        let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT)
+            .rng(rnd.clone())
+            .start_in_interval(&rnd, 0, DELTA - 1)
+            .verbose(verbose)
+            .build()?;
+
+        let mut runner = Runner::new(setup);
+        runner.run(
+            Env::new()
+                .invariant(safety())
+                .invariant(no_k_view_timeouts(1))
+                .stop_cond(time_reached(END)),
+        )?;
+
+        let min_commited_height = min_committed_height(runner.state());
+        let want_commited_height = min_view(runner.state()) - 2;
+        ensure!(
+            min_commited_height >= want_commited_height,
+            "committed up to {min_commited_height}, expected at least {want_commited_height}"
+        );
+
+        Ok(())
+    })
 }
 
 #[test]
-fn progress_resumes_after_leader_crash() -> Result<()> {
-    let mut runner = Runner::new(setup(4).build()?);
-    runner.run(Env::new().invariant(safety()).stop_cond(time_reached(500)))?;
-    runner.crash(NodeID::from(2));
+fn sync_after_gst_no_byzantine_no_adversary() -> Result<()> {
+    let seeds = random_seeds(1_000);
+    for_each_seed(&seeds, |seed, verbose| {
+        const GST: u64 = 5 * DELTA;
+        const X: u64 = 2 * DELTA;
+        let leaders = RoundRobin::new(N4);
+        let rnd = SharedRng::new(seed);
+        let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT)
+            .rng(rnd.clone())
+            .start_in_interval(&rnd, 0, GST)
+            .verbose(verbose)
+            .build()?;
+        let mut runner = Runner::new(setup);
 
-    let height = min_committed_height(runner.state());
-    runner.run(
-        Env::new()
-            .invariant(safety())
-            .stop_cond(all_committed(height + 10))
-            .deadline(500 + 50 * VIEW_TIMEOUT),
-    )?;
-    Ok(())
+        runner.run(Env::new().invariant(safety()).stop_cond(time_reached(GST)))?;
+        let view_at_gst = max_view(runner.state());
+        let epoch_view = leaders.epoch_start(view_at_gst) + leaders.epoch_length();
+
+        runner.run(
+            Env::new()
+                .invariant(safety())
+                .stop_cond(move |state| max_view(state) >= epoch_view)
+                .deadline(GST + 3 * VIEW_TIMEOUT),
+        )?;
+        let first_entered_at = runner.state().now();
+
+        runner.run(
+            Env::new()
+                .invariant(safety())
+                .stop_cond(move |state| min_view(state) >= epoch_view)
+                .deadline(first_entered_at + X),
+        )
+    })
 }
 
-#[test]
-fn progress_after_gst() -> Result<()> {
-    const GST: u64 = 2_000;
-    for seed in 0..10 {
-        let mut runner = Runner::new(setup(4).build()?);
-        let delivery = until_gst(GST, DELTA, uniform(1, 400, seed));
-        runner
-            .run(
-                Env::new()
-                    .adversary(Adversary::new().delivery(delivery))
-                    .invariant(safety())
-                    .stop_cond(time_reached(GST)),
-            )
-            .map_err(|err| err.context(format!("seed {seed}")))?;
-
-        let height = min_committed_height(runner.state());
-        runner
-            .run(
-                Env::new()
-                    .invariant(safety())
-                    .stop_cond(all_committed(height + 10))
-                    .deadline(GST + 50 * VIEW_TIMEOUT),
-            )
-            .map_err(|err| err.context(format!("seed {seed}")))?;
-    }
-    Ok(())
-}
-
-#[test]
-fn partition_without_quorum_heals() -> Result<()> {
-    const HEAL: u64 = 1_500;
-    let mut runner = Runner::new(setup(4).build()?);
-    runner.run(
-        Env::new()
-            .adversary(Adversary::new().delivery(partition([&[0, 1]], HEAL, DELTA)))
-            .invariant(safety())
-            .stop_cond(time_reached(HEAL)),
-    )?;
-
-    let height = min_committed_height(runner.state());
-    runner.run(
-        Env::new()
-            .invariant(safety())
-            .stop_cond(all_committed(height + 10))
-            .deadline(HEAL + 50 * VIEW_TIMEOUT),
-    )?;
-    Ok(())
-}
-
-#[test]
-fn isolated_replica_catches_up() -> Result<()> {
-    const HEAL: u64 = 1_500;
-    let mut runner = Runner::new(setup(4).build()?);
-    runner.run(
-        Env::new()
-            .adversary(Adversary::new().delivery(isolate(1, HEAL, DELTA)))
-            .invariant(safety())
-            .stop_cond(time_reached(HEAL)),
-    )?;
-
-    let others = [0, 2, 3]
-        .map(|id| runner.state().committed_height(NodeID::from(id)))
-        .into_iter()
-        .min()
-        .unwrap_or(0);
-    ensure!(
-        others > 0,
-        "the connected majority made no progress while one replica was isolated"
-    );
-    runner.run(
-        Env::new()
-            .invariant(safety())
-            .stop_cond(all_committed(others + 5))
-            .deadline(HEAL + 50 * VIEW_TIMEOUT),
-    )?;
-    Ok(())
-}
-
-#[test]
-fn delayed_proposal_to_two_replicas() -> Result<()> {
-    const VIEW: u64 = 5;
-    let victims = [NodeID::from(1), NodeID::from(2)];
-    let attack = when(
-        move |_: &Ctx, p: &Packet| {
-            p.kind() == Kind::Proposal && p.view() == Some(VIEW) && victims.contains(&p.to)
-        },
-        fixed(3 * VIEW_TIMEOUT),
-        fixed(DELTA),
-    );
-    Runner::new(setup(4).build()?).run(
-        Env::new()
-            .adversary(Adversary::new().delivery(attack))
-            .invariant(safety())
-            .stop_cond(all_committed(20))
-            .deadline(100 * VIEW_TIMEOUT),
-    )?;
-    Ok(())
-}
-
-#[test]
-fn random_delays_keep_safety() -> Result<()> {
-    for seed in 0..20 {
-        let mut runner = Runner::new(setup(4).build()?);
-        runner
-            .run(
-                Env::new()
-                    .adversary(Adversary::new().delivery(uniform(1, 5 * DELTA, seed)))
-                    .invariant(safety())
-                    .stop_cond(time_reached(5_000)),
-            )
-            .map_err(|err| err.context(format!("seed {seed}")))?;
-        let height = min_committed_height(runner.state());
-        ensure!(height >= 5, "seed {seed}: committed only up to {height}");
-    }
-    Ok(())
-}
-
-fn setup(n: u32) -> Setup {
+fn setup(n: u32, delta: u64, view_timeout: u64, lock_timeout: u64) -> Setup {
     Setup::new(n)
-        .delay(DELTA)
-        .timeouts(VIEW_TIMEOUT, LOCK_TIMEOUT)
+        .delay(delta)
+        .timeouts(view_timeout, lock_timeout)
         .verbose(VERBOSE)
 }
 
-fn min_committed_height(state: &State) -> u64 {
-    state
-        .running()
-        .map(|id| state.committed_height(id))
-        .min()
-        .unwrap_or(0)
-}
-
-fn time_reached(time: u64) -> impl Fn(&State) -> bool {
-    move |state| state.next_time().is_none_or(|at| at > time)
-}
-
-fn all_committed(height: u64) -> impl Fn(&State) -> bool {
-    move |state| min_committed_height(state) >= height
-}

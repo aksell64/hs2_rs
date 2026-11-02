@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 pub struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -23,5 +26,32 @@ impl SplitMix64 {
 
     pub fn chance(&mut self, percent: u64) -> bool {
         self.range(0, 99) < percent
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedRng {
+    seed: u64,
+    inner: Rc<RefCell<SplitMix64>>,
+}
+
+impl SharedRng {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            inner: Rc::new(RefCell::new(SplitMix64::new(seed))),
+        }
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    pub fn range(&self, lo: u64, hi: u64) -> u64 {
+        self.inner.borrow_mut().range(lo, hi)
+    }
+
+    pub fn chance(&self, percent: u64) -> bool {
+        self.inner.borrow_mut().chance(percent)
     }
 }

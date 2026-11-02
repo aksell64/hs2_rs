@@ -7,3 +7,4 @@ mod scenarios;
 mod invariants;
 mod adversary;
 mod runner;
+mod byzantine;

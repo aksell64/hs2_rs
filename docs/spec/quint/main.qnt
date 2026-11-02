@@ -70,10 +70,7 @@ module main {
       net' = r.net,
       qc_views' = record_qcs_of(qc_views, r.state),
       all_qcs' = all_qcs.union(qcs_of(r.state)),
-      syncs' = match r.out {
-        | MissingBlock(hash) => syncs.put(id, request_block(syncs.get(id), hash))
-        | NoSmOutput => syncs
-      },
+      syncs' = syncs.put(id, r.sync.foldl(syncs.get(id), request_block)),
     }
 
   action sync_step(id: NodeID): bool =
@@ -193,8 +190,8 @@ module main {
     if (FAULTY.contains(l))
       true
     else
-      val pcm = nodes.get(l).driver.pacemaker
-      pcm.cur_view > v or (pcm.cur_view == v and pcm.proposed)
+      val driver = nodes.get(l).driver
+      driver.pacemaker.cur_view > v or driver.consensus.proposed_view >= v
 
   // Fairness assumption on the scheduler: a view timer is only allowed to fire once
   // the useful work of the view is done.

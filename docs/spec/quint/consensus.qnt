@@ -18,10 +18,12 @@ module consensus {
   | RejectVote(Block)
   | Commit(List[Block])
   | Propose(Proposal)
+  | ProposalDeferred({ missing: Hash, request: ProposeRequest })
 
   type Consensus = {
     qc_lock: CertifiedBlock,
     voted_view: View,
+    proposed_view: View,
     exec_hash: Hash,
     exec_height: Height,
 
@@ -39,6 +41,7 @@ module consensus {
       id: id,
       qc_lock: genesis_qc,
       voted_view: 0,
+      proposed_view: 0,
       exec_hash: genesis.hash,
       exec_height: genesis.height,
     }
@@ -52,7 +55,7 @@ module consensus {
     match input {
       | ReceivedProposal(proposal) => on_receive_proposal(c, kv, cur_view, proposal)
       | Update(block) => update(c, block, kv)
-      | MakeProposal(request) => on_propose(c, kv, high_qc, request)
+      | MakeProposal(request) => on_propose(c, kv, high_qc, cur_view, request)
     }
 
   pure def no_change(c: Consensus): ConsensusResult =
@@ -121,14 +124,18 @@ module consensus {
       c: Consensus,
       kv: KVStorage,
       high_qc: CertifiedBlock,
+      cur_view: View,
       request: ProposeRequest): ConsensusResult =
-    match get_block_by_hash(kv, high_qc.block) {
-      | None => no_change(c)
-      | Some(parent) =>
-        val block = create_leaf(request.hash, parent.hash, high_qc, parent.height + 1)
-        {
-          consensus: c,
-          out: Propose({ block: block, view: request.view }),
-        }
-    }
+    if (request.view != cur_view or request.view <= c.proposed_view)
+      no_change(c)
+    else
+      match get_block_by_hash(kv, high_qc.block) {
+        | None => { consensus: c, out: ProposalDeferred({ missing: high_qc.block, request: request }) }
+        | Some(parent) =>
+          val block = create_leaf(request.hash, parent.hash, high_qc, parent.height + 1)
+          {
+            consensus: c.with("proposed_view", request.view),
+            out: Propose({ block: block, view: request.view }),
+          }
+      }
 }

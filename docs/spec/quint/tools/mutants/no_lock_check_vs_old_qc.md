@@ -17,15 +17,16 @@ Status: success: with a leader that proposes on the genesis QC, correct replicas
 +c.voted_view < view
 
 --- consensus.qnt
--    match get_block_by_hash(kv, high_qc.block) {
-+    val genesis_qc = match get_block_by_hash(kv, 0) { | Some(g) => g.justify | None => high_qc }
-+    val qc = if (is_byzantine(c.id)) genesis_qc else high_qc
-+    match get_block_by_hash(kv, qc.block) {
-       | None => no_change(c)
-       | Some(parent) =>
--        val block = create_leaf(request.hash, parent.hash, high_qc, parent.height + 1)
-+        val block = create_leaf(request.hash, parent.hash, qc, parent.height + 1)
-         {
--          consensus: c,
-+          consensus: c.with("deviations", c.deviations + (if (qc.view < high_qc.view) 1 else 0)),
+-      match get_block_by_hash(kv, high_qc.block) {
+-        | None => { consensus: c, out: ProposalDeferred({ missing: high_qc.block, request: request }) }
++      val genesis_qc = match get_block_by_hash(kv, 0) { | Some(g) => g.justify | None => high_qc }
++      val qc = if (is_byzantine(c.id)) genesis_qc else high_qc
++      match get_block_by_hash(kv, qc.block) {
++        | None => { consensus: c, out: ProposalDeferred({ missing: qc.block, request: request }) }
+         | Some(parent) =>
+-          val block = create_leaf(request.hash, parent.hash, high_qc, parent.height + 1)
++          val block = create_leaf(request.hash, parent.hash, qc, parent.height + 1)
+           {
+-            consensus: c.with("proposed_view", request.view),
++            consensus: c.with("proposed_view", request.view).with("deviations", c.deviations + (if (qc.view < high_qc.view) 1 else 0)),
 ```
