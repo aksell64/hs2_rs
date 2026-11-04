@@ -211,7 +211,7 @@ pub fn partition<const N: usize>(groups: [&[u32]; N], heal: u64, delay: u64) -> 
     }
 }
 
-pub fn isolate(node: u32, heal: u64, delay: u64) -> Partition {
+pub fn isolate_node_from_all(node: u32, heal: u64, delay: u64) -> Partition {
     partition([&[node]], heal, delay)
 }
 
