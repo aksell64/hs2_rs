@@ -213,6 +213,18 @@ where
         self.state.unstarted.remove(&node_id);
         self.state.timers.remove(&node_id);
     }
+
+    pub fn note(&mut self, note: String) {
+        if let Some(trace) = &mut self.trace {
+            trace.note(note);
+        }
+    }
+
+    pub fn mark(&mut self, at: CS::Clock, label: &str) {
+        if let Some(trace) = &mut self.trace {
+            trace.mark(at, label);
+        }
+    }
 }
 
 impl<CS: ManualClock> Simulator<CS>
@@ -286,13 +298,6 @@ where
         self.state.clock.set(now);
 
         let traced = self.trace.is_some();
-        let timeout = match &event {
-            Event::Timer {
-                timer: TimerEvent::ViewTimeout(view),
-                ..
-            } => Some(*view),
-            _ => None,
-        };
         let (node_id, inputs, label) = match event {
             Event::Start { node_id } => {
                 if let Some(replica) = self.state.unstarted.remove(&node_id) {
@@ -360,7 +365,7 @@ where
         if let Some(label) = label {
             let snapshot = self.snapshot(node_id);
             if let Some(trace) = &mut self.trace {
-                trace.step(now, node_id, &label, timeout, &effects, snapshot);
+                trace.step(now, node_id, &label, &effects, snapshot);
             }
         }
         Ok(Some((node_id, now, effects)))

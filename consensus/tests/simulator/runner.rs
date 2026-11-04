@@ -88,6 +88,14 @@ where
         self.sim.crash(node_id);
     }
 
+    pub fn note(&mut self, note: String) {
+        self.sim.note(note);
+    }
+
+    pub fn mark(&mut self, at: CS::Clock, label: &str) {
+        self.sim.mark(at, label);
+    }
+
     pub fn state(&self) -> &GlobalState<CS> {
         self.sim.state()
     }
