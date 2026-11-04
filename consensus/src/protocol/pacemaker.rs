@@ -2,12 +2,12 @@ use crate::network::message::{Message, Recipient};
 use crate::protocol::effects::{Effect, send_to, send_to_each};
 use crate::protocol::leaders::LeaderPolicy;
 use crate::protocol::timeouts::TimeoutPolicy;
-use crate::storage::{KVError, ReadWriteStorage};
+use crate::storage::{KVError, ReadStorage, ReadWriteStorage};
 use crate::timer::service::TimerCommand;
 use crate::types::View;
 use crate::types::block::Command;
 use crate::types::certificate::{BlockQC, TimeoutQC};
-use crate::types::clock::{Clock, Source};
+use crate::types::clock::{Clock, ClockSource};
 use crate::types::crypto::Notary;
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
@@ -55,8 +55,8 @@ impl<S: Scheme, C: Command, CL: Clock> PacemakerResult<S, C, CL> {
 
 pub struct Pacemaker<
     S: Scheme,
-    TP: TimeoutPolicy,
-    TS: Source<Clock = TP::Clock>,
+    TP: TimeoutPolicy<CS::Clock>,
+    CS: ClockSource,
     LP: LeaderPolicy,
 > {
     notary: Notary<S>,
@@ -65,20 +65,21 @@ pub struct Pacemaker<
     sent_wish: BTreeSet<View>,
     relayed_tc: BTreeSet<View>,
     scheduled_epoch: Option<View>,
-    source: TS,
+    lock_expired: View,
+    source: CS,
     policy: TP,
     leaders: LP,
 }
 
 type PacemakerApply<S, C, CL> = Result<PacemakerResult<S, C, CL>, KVError>;
 
-impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPolicy>
-    Pacemaker<S, TP, TS, LP>
+impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
+    Pacemaker<S, TP, CS, LP>
 {
     pub fn new(
         notary: Notary<S>,
         id: NodeID,
-        source: TS,
+        source: CS,
         policy: TP,
         leaders: LP,
     ) -> Self {
@@ -89,6 +90,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
             sent_wish: BTreeSet::new(),
             relayed_tc: BTreeSet::new(),
             scheduled_epoch: None,
+            lock_expired: 0,
             source,
             policy,
             leaders,
@@ -99,7 +101,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
         &mut self,
         storage: &mut DB,
         event: PacemakerInput<S>,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+    ) -> PacemakerApply<S, C, CS::Clock> {
         match event {
             PacemakerInput::ReceivedQC(qc) => self.process_qc(storage, qc),
             PacemakerInput::ViewTimerExpired(view) => self.on_timer_expired(storage, view),
@@ -125,7 +127,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
         &mut self,
         storage: &mut DB,
         qc: BlockQC<S>,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+    ) -> PacemakerApply<S, C, CS::Clock> {
         if !self.notary.verify_qc(&qc) || qc.view() <= storage.get_high_qc()?.view() {
             return Ok(PacemakerResult::no_change());
         }
@@ -141,14 +143,13 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
         &mut self,
         storage: &mut DB,
         view: View,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+    ) -> PacemakerApply<S, C, CS::Clock> {
         let previous = storage.get_cur_view()?;
         if view <= previous {
             return Ok(PacemakerResult::no_change());
         }
         storage.update_cur_view(view)?;
         storage.update_cur_leader(self.leader(view))?;
-        storage.update_proposed(false)?;
         self.statuses = BTreeSet::from([self.id]);
         let start = self.source.now();
         let mut timers = vec![
@@ -169,16 +170,16 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
         &mut self,
         storage: &mut DB,
         view: View,
-        start: TP::Clock,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+        start: CS::Clock,
+    ) -> PacemakerApply<S, C, CS::Clock> {
         if view != storage.get_cur_view()? {
             return Ok(PacemakerResult::no_change());
         }
         let high_qc = storage.get_high_qc()?;
         let has_previous_qc = high_qc.view() + 1 == view;
         if self.is_leader(view) {
-            if has_previous_qc {
-                return Self::try_propose(storage, view);
+            if self.can_propose(storage, view)? {
+                return Ok(Self::propose_now(view));
             }
             let lock = self.policy.lock_deadline(view, start);
             let lock_timer = Effect::Timer(TimerCommand::SetLockTimer(lock));
@@ -194,36 +195,40 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
         Ok(PacemakerResult::no_change().with_effects(vec![status]))
     }
 
-    fn try_propose<C: Command, DB: ReadWriteStorage<S, C>>(
-        storage: &mut DB,
+    pub fn can_propose<C: Command, DB: ReadStorage<S, C>>(
+        &self,
+        storage: &DB,
         view: View,
-    ) -> PacemakerApply<S, C, TP::Clock> {
-        if storage.get_proposed()? {
-            return Ok(PacemakerResult::no_change());
-        }
-        storage.update_proposed(true)?;
-        Ok(PacemakerResult {
+    ) -> Result<bool, KVError> {
+        Ok(view == storage.get_cur_view()?
+            && self.is_leader(view)
+            && (storage.get_high_qc()?.view() + 1 == view || self.lock_expired == view))
+    }
+
+    fn propose_now<C: Command>(view: View) -> PacemakerResult<S, C, CS::Clock> {
+        PacemakerResult {
             effects: Vec::new(),
             out: PacemakerOutput::ProposeNow(view),
-        })
+        }
     }
 
     fn on_lock_timer_expired<C: Command, DB: ReadWriteStorage<S, C>>(
         &mut self,
         storage: &mut DB,
         view: View,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+    ) -> PacemakerApply<S, C, CS::Clock> {
         if view != storage.get_cur_view()? || !self.is_leader(view) {
             return Ok(PacemakerResult::no_change());
         }
-        Self::try_propose(storage, view)
+        self.lock_expired = view;
+        Ok(Self::propose_now(view))
     }
 
     fn on_timer_expired<C: Command, DB: ReadWriteStorage<S, C>>(
         &mut self,
         storage: &mut DB,
         view: View,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+    ) -> PacemakerApply<S, C, CS::Clock> {
         if view != storage.get_cur_view()? {
             return Ok(PacemakerResult::no_change());
         }
@@ -248,7 +253,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
         &mut self,
         storage: &mut DB,
         tc: TimeoutQC<S>,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+    ) -> PacemakerApply<S, C, CS::Clock> {
         if !self.notary.verify_qc(&tc) || !self.relayed_tc.insert(tc.view()) {
             return Ok(PacemakerResult::no_change());
         }
@@ -266,7 +271,7 @@ impl<S: Scheme, TP: TimeoutPolicy, TS: Source<Clock = TP::Clock>, LP: LeaderPoli
         &mut self,
         storage: &mut DB,
         status: Status<S>,
-    ) -> PacemakerApply<S, C, TP::Clock> {
+    ) -> PacemakerApply<S, C, CS::Clock> {
         if !self.is_leader(status.view) {
             return Ok(PacemakerResult::no_change());
         }

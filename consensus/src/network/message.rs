@@ -17,7 +17,7 @@ pub enum Message<S: Scheme, C: Command> {
 }
 
 impl<S: Scheme, C: Command> Message<S, C> {
-    pub(crate) fn into_event(self, sender: NodeID) -> DriverInput<S, C> {
+    pub fn into_event(self, sender: NodeID) -> DriverInput<S, C> {
         match self {
             Message::ProposalMsg(proposal) => DriverInput::NewProposal { sender, proposal },
             Message::VoteMsg(signed_vote) => DriverInput::NewVote(signed_vote),

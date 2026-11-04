@@ -144,4 +144,54 @@ module scenariosTest {
       .then(checked_step(1))
       .expect(voted_of(1) == 3)
       .expect(lock_of(1).view == 2)
+
+  def vote_packet(sender: NodeID, view: View, block: Hash): Packet =
+    { sender: sender, msg: VoteMsg({ view: view, block: block }) }
+
+  def stored(id: NodeID, hash: Hash): bool =
+    nodes.get(id).kv.block_by_hash.keys().contains(hash)
+
+  run orphanProposalVotesAfterSyncTest =
+    val h1 = block_hash(1, 1)
+    val h2 = block_hash(2, 2)
+    init
+      .then(inject(2, vote_packet(0, 1, h1)))
+      .then(MAX_ROUNDS_PER_VIEW.reps(_ => step_until_proposed(1, 2).then(step_until_proposed(2, 2))))
+      .expect(leader_finished(2))
+      .then(inject(3, { sender: 2, msg: ProposalMsg(proposal(2, 0, 2, high_qc_of(2))) }))
+      .then(2.reps(_ => checked_step(3)))
+      .expect(view_of(3) == 2)
+      .expect(voted_of(3) == 0)
+      .expect(not(stored(3, h1)))
+      .expect(not(stored(3, h2)))
+      .expect(has_sync_requests(3))
+      .expect(nodes.get(3).driver.orphans.keys() == Set(h1))
+      .then(sync_step(3))
+      .then(checked_step(3))
+      .expect(stored(3, h1))
+      .expect(stored(3, h2))
+      .expect(voted_of(3) == 2)
+      .expect(nodes.get(3).driver.orphans.keys() == Set())
+
+  run leaderProposesAfterSyncTest =
+    val h1 = block_hash(1, 1)
+    init
+      .then(2.reps(_ => checked_step(1)))
+      .expect(stored(1, h1))
+      .then(inject(2, vote_packet(0, 1, h1)))
+      .then(inject(2, vote_packet(1, 1, h1)))
+      .then(inject(2, vote_packet(3, 1, h1)))
+      .then(4.reps(_ => checked_step(2)))
+      .expect(view_of(2) == 2)
+      .expect(high_qc_of(2).view == 1)
+      .expect(not(stored(2, h1)))
+      .expect(not(leader_finished(2)))
+      .expect(has_sync_requests(2))
+      .expect(nodes.get(2).driver.orphans.keys() == Set(h1))
+      .then(sync_step(2))
+      .then(checked_step(2))
+      .expect(stored(2, h1))
+      .expect(leader_finished(2))
+      .expect(nodes.get(2).driver.orphans.keys() == Set())
+      .expect(net.inbox.get(3).select(p => p.msg == ProposalMsg(proposal(2, 0, 2, high_qc_of(2)))).length() == 1)
 }

@@ -17,7 +17,7 @@ const EXEC_HEIGHT: u8 = 6;
 const EXEC_HASH: u8 = 7;
 const CUR_VIEW: u8 = 8;
 const CUR_LEADER: u8 = 9;
-const PROPOSED: u8 = 10;
+const PROPOSED_VIEW: u8 = 10;
 
 fn key(tag: u8, suffix: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + suffix.len());
@@ -91,8 +91,8 @@ where
         self.get_or_missing(key(CUR_LEADER, &[]))
     }
 
-    fn get_proposed(&self) -> Result<bool, KVError> {
-        self.get_or_missing(key(PROPOSED, &[]))
+    fn get_proposed_view(&self) -> Result<View, KVError> {
+        self.get_or_missing(key(PROPOSED_VIEW, &[]))
     }
 }
 
@@ -164,8 +164,8 @@ where
         self.put(key(CUR_LEADER, &[]), leader)
     }
 
-    fn update_proposed(&mut self, proposed: bool) -> Result<(), KVError> {
-        self.put(key(PROPOSED, &[]), proposed)
+    fn update_proposed_view(&mut self, view: View) -> Result<(), KVError> {
+        self.put(key(PROPOSED_VIEW, &[]), view)
     }
 }
 
@@ -178,7 +178,7 @@ mod tests {
     type Store = KVStorage<MemoryKV<Vec<u8>, Vec<u8>>>;
 
     fn genesis_store() -> (TestScheme, Store) {
-        let scheme = TestScheme { n: 4 };
+        let scheme = TestScheme { n: 4, id: None };
         let genesis_qc = qc(&scheme, 0, digest(0));
         let genesis = block(digest(0), digest(0), genesis_qc.clone(), 0);
         let mut store: Store = KVStorage::new(MemoryKV::new());
@@ -193,7 +193,7 @@ mod tests {
         write.update_exec_hash(digest(0)).unwrap();
         write.update_cur_view(0).unwrap();
         write.update_cur_leader(NodeID::from(0)).unwrap();
-        write.update_proposed(false).unwrap();
+        write.update_proposed_view(0).unwrap();
         Storage::<TestScheme, TestCommand>::commit_write_batch(&mut store, batch).unwrap();
         (scheme, store)
     }
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(read.get_exec_height().unwrap(), 0);
         assert_eq!(read.get_exec_hash().unwrap(), digest(0));
         assert_eq!(read.get_cur_view().unwrap(), 0);
-        assert!(!read.get_proposed().unwrap());
+        assert_eq!(read.get_proposed_view().unwrap(), 0);
         assert_eq!(read.get_block_by_hash(&digest(0)).unwrap().unwrap().height, 0);
     }
 

@@ -19,11 +19,16 @@ module driver {
   type DriverOutput =
   | Replay(DriverInput)
 
+  type Deferred =
+  | DeferredPropose(ProposeRequest)
+  | DeferredReceiveProposal({ sender: NodeID, proposal: Proposal })
+
   type Driver = {
     consensus: Consensus,
     pacemaker: Pacemaker,
     collector: Collector,
     pending: View -> List[{ sender: NodeID, proposal: Proposal }],
+    orphans: Hash -> List[Deferred],
   }
 
   type DriverResult = {
@@ -32,6 +37,7 @@ module driver {
     net: List[Envelope],
     timers: List[TimerCommand],
     out: List[DriverOutput],
+    sync: List[Hash],
   }
 
   pure def init_driver(id: NodeID, genesis: Block, genesis_qc: CertifiedBlock): Driver =
@@ -40,6 +46,7 @@ module driver {
       pacemaker: init_pacemaker(id, genesis_qc),
       collector: { generic_collectors: Map(), timeout_collectors: Map() },
       pending: Map(),
+      orphans: Map(),
     }
 
   pure def apply_driver(d: Driver, kv: KVStorage, input: DriverInput): DriverResult =
@@ -51,11 +58,11 @@ module driver {
       | NewTC(tc) => on_timeout_certificate(d, kv, tc)
       | ViewTimerFired(v) => on_view_timer_fired(d, kv, v)
       | LockTimerFired(v) => on_lock_timer_fired(d, kv, v)
-      | BlockSynced(_) => driver_no_change(d, kv)
+      | BlockSynced(block) => on_block_synced(d, kv, block)
     }
 
   pure def driver_no_change(d: Driver, kv: KVStorage): DriverResult =
-    { driver: d, kv: kv, net: [], timers: [], out: [] }
+    { driver: d, kv: kv, net: [], timers: [], out: [], sync: [] }
 
   pure def add_out(o: DriverOutput, res: DriverResult): DriverResult =
     res.with("out", res.out.append(o))
@@ -67,6 +74,7 @@ module driver {
       net: first.net.concat(second.net),
       timers: first.timers.concat(second.timers),
       out: first.out.concat(second.out),
+      sync: first.sync.concat(second.sync),
     }
 
   pure def add_net_msg(receiver: Recipient, msg: Message, res: DriverResult): DriverResult =
@@ -120,6 +128,32 @@ module driver {
       val handled = call_proposal_or_buffer(processed.driver, processed.kv, signed)
       merge_results(processed, handled)
 
+  pure def on_block_synced(d: Driver, kv: KVStorage, block: Block): DriverResult =
+    if (block.parent != block.justify.block or not(is_valid_qc(block.justify)))
+      driver_no_change(d, kv)
+    else
+      val updated = call_update_locked(pop_deferred(d, block.hash), kv, block)
+      val called = call_pacemaker(updated.driver, ReceivedQC(block.justify))
+      val processed = handle_pacemaker_result(updated.driver, updated.kv, called)
+      deferred_of(d, block.hash).foldl(processed, (res, deferred) =>
+        merge_results(res, run_deferred(res.driver, res.kv, deferred))
+      )
+
+  pure def run_deferred(d: Driver, kv: KVStorage, deferred: Deferred): DriverResult =
+    match deferred {
+      | DeferredPropose(request) => on_propose_request(d, kv, request)
+      | DeferredReceiveProposal(signed) => call_proposal_or_buffer(d, kv, signed)
+    }
+
+  pure def deferred_of(d: Driver, hash: Hash): List[Deferred] =
+    if (d.orphans.keys().contains(hash)) d.orphans.get(hash) else []
+
+  pure def add_deferred(d: Driver, missing: Hash, deferred: Deferred): Driver =
+    d.with("orphans", d.orphans.put(missing, deferred_of(d, missing).append(deferred)))
+
+  pure def pop_deferred(d: Driver, hash: Hash): Driver =
+    d.with("orphans", d.orphans.keys().exclude(Set(hash)).mapBy(h => d.orphans.get(h)))
+
   pure def call_proposal_qc_processed(d: Driver, kv: KVStorage, proposal: Proposal): DriverResult =
     val processed = call_consensus(d, kv, ReceivedProposal(proposal))
     match processed.out {
@@ -167,6 +201,9 @@ module driver {
       | Propose(proposal) =>
         val result = driver_no_change(proposed.driver, kv)
         add_net_msg(All, ProposalMsg(proposal), result)
+      | ProposalDeferred(deferred) =>
+        val parked = add_deferred(proposed.driver, deferred.missing, DeferredPropose(deferred.request))
+        driver_no_change(parked, kv).with("sync", [deferred.missing])
       | _ => driver_no_change(proposed.driver, kv)
     }
 
@@ -207,11 +244,28 @@ module driver {
   pure def pending_at(d: Driver, v: View): List[{ sender: NodeID, proposal: Proposal }] =
     if (d.pending.keys().contains(v)) d.pending.get(v) else []
 
+  pure def check_missing_parent(kv: KVStorage, proposal: Proposal): Option[Hash] =
+    val parent = proposal.block.parent
+    match get_block_by_hash(kv, parent) {
+      | Some(_) => None
+      | None => Some(parent)
+    }
+
   pure def call_proposal_or_buffer(d: Driver, kv: KVStorage, signed: { sender: NodeID, proposal: Proposal }): DriverResult =
     val v = signed.proposal.view
-    if (v > d.pacemaker.get_current_view())
-      driver_no_change(d.with("pending", d.pending.put(v, pending_at(d, v).append(signed))), kv)
-    else
-      call_proposal_qc_processed(d, kv, signed.proposal)
+    match check_missing_parent(kv, signed.proposal) {
+      | Some(parent) =>
+        val parked =
+          if (parent == signed.proposal.block.justify.block)
+            add_deferred(d, parent, DeferredReceiveProposal(signed))
+          else
+            d
+        driver_no_change(parked, kv).with("sync", [parent])
+      | None =>
+        if (v > d.pacemaker.get_current_view())
+          driver_no_change(d.with("pending", d.pending.put(v, pending_at(d, v).append(signed))), kv)
+        else
+          call_proposal_qc_processed(d, kv, signed.proposal)
+    }
 
 }

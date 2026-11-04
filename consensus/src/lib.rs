@@ -5,6 +5,7 @@ pub mod storage;
 pub mod network;
 pub mod sm;
 pub mod timer;
-mod node;
+pub mod node;
 #[cfg(any(test, feature = "testing"))]
 pub mod mocks;
+mod app;

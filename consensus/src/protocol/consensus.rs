@@ -1,3 +1,4 @@
+use crate::protocol::consensus::ConsensusOutput::ProposalDeferred;
 use crate::storage::{KVError, ReadStorage, ReadWriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
@@ -25,6 +26,10 @@ pub enum ConsensusOutput<S: Scheme, C: Command> {
     RejectVote(Block<S, C>),
     Commit(Vec<Block<S, C>>),
     Propose(Proposal<S, C>),
+    ProposalDeferred {
+        missing: S::Digest,
+        request: ProposeRequest<C>,
+    },
 }
 
 pub struct Consensus<S: Scheme> {
@@ -46,9 +51,13 @@ impl<S: Scheme> Consensus<S> {
         event: ConsensusInput<S, C>,
     ) -> ConsensusResult<S, C> {
         match event {
-            ConsensusInput::ReceivedProposal(proposal) => self.on_receive_proposal(storage, cur_view, proposal),
+            ConsensusInput::ReceivedProposal(proposal) => {
+                self.on_receive_proposal(storage, cur_view, proposal)
+            }
             ConsensusInput::Update(block) => self.update(storage, block),
-            ConsensusInput::MakeProposal(request) => self.on_propose(storage, high_qc, request),
+            ConsensusInput::MakeProposal(request) => {
+                self.on_propose(storage, high_qc, cur_view, request)
+            }
         }
     }
 
@@ -149,18 +158,27 @@ impl<S: Scheme> Consensus<S> {
         Ok(Some(ConsensusOutput::Commit(branch)))
     }
 
-    fn on_propose<C: Command, DB: ReadStorage<S, C>>(
+    fn on_propose<C: Command, DB: ReadWriteStorage<S, C>>(
         &self,
-        storage: &DB,
+        storage: &mut DB,
         high_qc: &BlockQC<S>,
+        cur_view: View,
         request: ProposeRequest<C>,
     ) -> ConsensusResult<S, C> {
-        let Some(parent) = storage.get_block_by_hash(&high_qc.block())? else {
+        if request.view != cur_view || request.view <= storage.get_proposed_view()? {
             return Ok(None);
+        }
+        let Some(parent) = storage.get_block_by_hash(&high_qc.block())? else {
+            return Ok(Some(ProposalDeferred {
+                missing: high_qc.block(),
+                request,
+            }));
         };
         let justify = high_qc.clone();
         let height = parent.height + 1;
-        let hash = self.notary.block_hash(&parent.hash, &request.cmd, &justify, height);
+        let hash = self
+            .notary
+            .block_hash(&parent.hash, &request.cmd, &justify, height);
         let block = Block {
             hash,
             parent: parent.hash,
@@ -168,6 +186,7 @@ impl<S: Scheme> Consensus<S> {
             justify,
             height,
         };
+        storage.update_proposed_view(request.view)?;
         Ok(Some(ConsensusOutput::Propose(Proposal {
             block,
             view: request.view,

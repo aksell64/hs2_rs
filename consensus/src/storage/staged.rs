@@ -17,7 +17,7 @@ pub struct StagedStorage<'a, S: Scheme, C: Command, DB: Storage<S, C>> {
     exec_hash: Option<S::Digest>,
     cur_view: Option<View>,
     cur_leader: Option<NodeID>,
-    proposed: Option<bool>,
+    proposed_view: Option<View>,
 }
 
 impl<'a, S: Scheme, C: Command, DB: Storage<S, C>> StagedStorage<'a, S, C, DB> {
@@ -33,7 +33,7 @@ impl<'a, S: Scheme, C: Command, DB: Storage<S, C>> StagedStorage<'a, S, C, DB> {
             exec_hash: None,
             cur_view: None,
             cur_leader: None,
-            proposed: None,
+            proposed_view: None,
         }
     }
 
@@ -103,10 +103,10 @@ impl<S: Scheme, C: Command, DB: Storage<S, C>> ReadStorage<S, C> for StagedStora
         }
     }
 
-    fn get_proposed(&self) -> Result<bool, KVError> {
-        match self.proposed {
-            Some(proposed) => Ok(proposed),
-            None => self.storage.get_proposed(),
+    fn get_proposed_view(&self) -> Result<View, KVError> {
+        match self.proposed_view {
+            Some(view) => Ok(view),
+            None => self.storage.get_proposed_view(),
         }
     }
 }
@@ -157,8 +157,8 @@ impl<S: Scheme, C: Command, DB: Storage<S, C>> WriteStorage<S, C> for StagedStor
         self.batch.update_cur_leader(leader)
     }
 
-    fn update_proposed(&mut self, proposed: bool) -> Result<(), KVError> {
-        self.proposed = Some(proposed);
-        self.batch.update_proposed(proposed)
+    fn update_proposed_view(&mut self, view: View) -> Result<(), KVError> {
+        self.proposed_view = Some(view);
+        self.batch.update_proposed_view(view)
     }
 }

@@ -7,3 +7,4 @@ trace.shiviz.log
 todo.md
 docs/spec/quint/tools/analyze.py
 __pycache__/
+docs/spec/protocol_notes.md
