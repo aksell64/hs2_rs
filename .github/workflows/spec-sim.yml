@@ -33,7 +33,7 @@ jobs:
       - run: npm install -g @informalsystems/quint@0.32.0
       - run: make sim STEP=step_fair MODEL=${{ inputs.model }} MAX_STEPS=${{ inputs.max_steps }} SAMPLES=${{ inputs.samples }} SEED=${{ inputs.seed }}
       - if: always() && hashFiles('docs/spec/quint/trace.itf.json') != ''
-        run: make analyze
+        run: make analyze viz
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -41,4 +41,6 @@ jobs:
           path: |
             docs/spec/quint/trace.itf.json
             docs/spec/quint/analisys.md
+            docs/spec/quint/trace.html
+            docs/spec/quint/trace.shiviz.log
           if-no-files-found: ignore
