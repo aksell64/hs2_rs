@@ -26,7 +26,7 @@ Out of scope (phase 2, Section 9):
 
 - catching up a node that is far behind (thousands of blocks) by committed-height ranges;
 - pruned storage and state sync;
-- peer scoring and rate limiting beyond the per-peer limits in Section 6.
+- rate limiting beyond the per-peer limits in Section 6.
 
 ---
 
@@ -148,7 +148,13 @@ type Fetch = {
 type SyncClient = {
   fetches: Hash -> Fetch,        // one entry per missing hash
   buffered: Hash -> Block,       // verified blocks that do not connect to storage yet
-  statuses: NodeID -> Height,    // highest height announced by each peer, never decreases
+  statuses: NodeID -> Status,    // last status of each peer
+  scores: NodeID -> PeerScore,   // request history of each peer (Section 4.7)
+}
+
+type Status = {
+  height: Height,                // highest height announced by the peer, never decreases
+  received: Time,                // when the last SyncStatus from the peer arrived
 }
 ```
 
@@ -175,7 +181,8 @@ Send `BlockRequest{ id, h, MAX_BLOCKS }` to `p` and set `peer = Some(p)`.
 
 **On timeout of a fetch:** send the request to the next peer (as above), `attempt + 1`.
 
-**On `SyncStatus{ height }`** from `p`: `statuses[p] = max(statuses[p], height)`.
+**On `SyncStatus{ height }`** from `p`: `statuses[p] = { height: max(statuses[p].height, height), received: now }`.
+Nothing else: a status is not verified, not forwarded, and changes neither consensus state nor scores.
 
 **On every step:** drop fetches whose hash got stored by other means (e.g. the proposal arrived through
 consensus); release their parked proposals.
@@ -205,7 +212,8 @@ continues from the lowest block (T3).
 - otherwise: reply `NotFound{ id }`, so the client moves on without waiting for a timeout.
 
 **Statuses:** every `STATUS_INTERVAL`, and on `StatusRequest`, send `SyncStatus{ height }` of the highest
-stored block to all nodes. Because stored blocks always have their ancestors (`stored_ancestry_inv`), a
+stored block to all nodes, even if the height did not change: a repeated status also tells that the
+peer is alive. Because stored blocks always have their ancestors (`stored_ancestry_inv`), a
 correct node with height `H` stores one complete chain up to `H`.
 
 The server reads its storage only; it never changes consensus state.
@@ -219,13 +227,16 @@ For a fetch of height `h`:
    for T1 the sender of the parked proposal (the current leader built on the missing parent), for T2 and T3
    the leader of `qc.view` (it proposed the missing block). It heads the first round's queue and is not
    repeated in steps 2–3.
-1. `C = { p != self : statuses[p] >= h }`.
-2. If `|C| >= f+1`: the round queue is `f+1` random peers of `C` in random order. At most `f` statuses are
+1. `C = { p != self : statuses[p].height >= h and now - statuses[p].received < STATUS_TTL }`. A peer
+   without a fresh status (for example, one that crashed) is not a candidate; `STATUS_TTL` is a few
+   `STATUS_INTERVAL`s.
+2. If `|C| >= f+1`: the round queue is `f+1` peers of `C` drawn by score (4.7). At most `f` statuses are
    Byzantine, so the queue contains at least one correct node that stores a chain up to height `h` or above.
 3. If `|C| < f+1` (statuses lag behind a fresh block): send `StatusRequest` to all, wait `STATUS_WAIT`,
    recompute `C`; if it is still smaller than `f+1`, the queue is `C`.
-4. When the queue is exhausted without success, the next round asks the whole committee in random order.
-   This round guarantees termination even with stale or false statuses.
+4. When the queue is exhausted without success, the next round asks the whole committee in
+   score-weighted random order, including peers without a fresh status. This round guarantees termination
+   even with stale or false statuses.
 
 Requests are sent **one at a time**; the client never polls several peers for the same block in parallel,
 so a missing block costs the network one response, not `f+1`.
@@ -240,6 +251,66 @@ What the guarantee covers:
 
 Statuses only choose whom to ask. Every response is still verified (4.4), so a false status can delay a
 fetch but cannot make a node store a wrong block.
+
+### 4.7. Peer scoring
+
+Each node keeps a score for every other committee member and uses it to order sync requests. The score
+only changes *whom to ask first*; it never decides whether a response is accepted (that is 4.4).
+
+```quint
+type PeerScore = { score: float, updated: Time }
+```
+
+A peer without an entry has the initial score `0.5`. An entry not updated for `SCORE_TTL` is dropped, so
+the peer starts again from `0.5`. `SCORE_TTL` is a configuration parameter and is meant to be long (hours,
+not seconds): the history of a peer stays useful across many fetches.
+
+**Update rule** (exponential moving average, as in Malachite ValueSync). After every request the node
+itself sent, the score of the peer that handled it changes:
+
+| outcome | new score | α |
+|---|---|---|
+| valid response (4.4), including a short one | `α·q + (1−α)·score` | `ALPHA_SUCCESS = 0.2` |
+| timeout | `(1−α)·score` | `ALPHA_TIMEOUT = 0.1` |
+| invalid response (fails 4.4) | `(1−α)·score` | `ALPHA_FAILURE = 0.15` |
+| `NotFound` | unchanged | — |
+
+`q` is the response quality in `[0, 1]`, computed from the response time `t`:
+
+```
+q = 1                                             if t <= SLOW_THRESHOLD
+q = exp(-(t - SLOW_THRESHOLD) / SLOW_THRESHOLD)   otherwise
+```
+
+The score goes up only for valid responses, the faster the more; it goes down for timeouts and, more
+steeply, for invalid responses. A slow but correct peer drifts down slowly, because a node that syncs from
+it may not keep up with the network.
+
+Why these outcomes:
+
+- an **invalid response** is attributable to the peer: a correct node serves only blocks from its storage,
+  and they always pass 4.4 (wrong hash, broken chain, invalid QC, too many blocks). This assumes an
+  authenticated channel, so that nobody can send a response on behalf of another peer;
+- a **short response** is not a fault: a server may stop before `max`, and the client continues with T3;
+- **`NotFound`** is not a fault: a correct peer may store another branch at the requested height;
+- statuses and consensus messages do not change the score.
+
+Penalties multiply the score, so it never reaches 0: a correct peer that was down for a while is still
+asked now and then, and recovers with its first valid responses.
+
+**Use in peer selection:**
+
+- the author (4.6, step 0) is still asked first, regardless of its score;
+- the candidates of a round are drawn from `C` (or from the committee) **without replacement, with
+  probability proportional to the score**: peers with a better history are asked earlier, but the order
+  stays random and Byzantine peers cannot predict it;
+- drawing without replacement keeps the `f+1` candidates distinct, so the guarantee of 4.6 (at least one
+  correct candidate) does not depend on the scores;
+- with no history all scores are `0.5` and the order is uniform random.
+
+Compared with Malachite, there is no partial-success outcome (a short response is normal here), no
+per-request exclusion list (the round queue already asks each peer once), and no reset after a minute of
+inactivity (`SCORE_TTL` is long and configurable).
 
 ---
 
@@ -279,7 +350,9 @@ within the first 100 traces under both steps.
 - **One outstanding request per fetch**, at most `MAX_FETCHES` fetches per node. The number of fetches is
   already bounded by the number of certified blocks the node has heard of (at most one QC per view).
 - **`MAX_BLOCKS` per response** on both sides: the server truncates, the client rejects longer responses.
-- **Statuses:** one `SyncStatus` per node per `STATUS_INTERVAL`; the client keeps one height per peer.
+- **Statuses:** one `SyncStatus` per node per `STATUS_INTERVAL`; the client keeps one status per peer and
+  ignores statuses older than `STATUS_TTL`.
+- **Scores:** kept only for committee members; entries not updated for `SCORE_TTL` are dropped.
 - **Server side:** at most one request per peer in progress; further requests from the same peer wait or are
   dropped (implementation detail, not modeled).
 - **Buffered chains** are bounded by the lag of the node; above `MAX_BUFFERED` the client drops the buffer and
@@ -382,6 +455,7 @@ blocks. Phase 2 adds range requests for the **committed** chain, where heights a
 - pull induction is impossible by construction: availability comes from the QC;
 - self-verifying responses; statuses only pick peers, so false statuses and Byzantine servers can only delay;
 - works with TBLS certificates, which hide the signers;
+- peer scoring: peers that timed out, sent invalid responses or answered slowly are asked later;
 - small change to consensus: one new driver input handler and the request gate in the state machine.
 
 **Cons**
