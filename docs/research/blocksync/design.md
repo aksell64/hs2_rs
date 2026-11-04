@@ -318,12 +318,12 @@ inactivity (`SCORE_TTL` is long and configurable).
 
 | piece | where | what |
 |---|---|---|
-| `SyncMessage`, sync channel | `blocksync.qnt`, `main.qnt` | `var sync_net: NodeID -> Set[{ from: NodeID, msg: SyncMessage }]` (unordered, like Malachite buffers) |
-| client and server | `blocksync.qnt` | pure functions `on_missing`, `on_response`, `on_timeout`, `serve` |
+| `SyncMessage`, sync channel | `blocksync.qnt`, `main.qnt` | `var sync_net: Set[SyncPacket]`, `SyncPacket = { from, to, msg: SyncMsg }` (unordered, like Malachite buffers) |
+| client and server | `blocksync.qnt` | pure functions `on_missing`, `on_response`, `on_timeout`, `on_sync_status`, `serve` |
 | `MissingBlock(qc)`, request gate, T2, parking | `sm.qnt` | replaces `check_missing_parent` |
 | `BlockSynced` | `driver.qnt` | Section 3.4 |
-| ghost `minted: Hash -> Block` | `main.qnt` | every block created by `on_propose` or `deliver_faulty`; used by verification and invariants |
-| actions | `main.qnt` | `sync_client_step`, `sync_server_step`, `sync_timeout`, `deliver_faulty_sync` |
+| ghost `minted: Set[Block]` | `main.qnt` | every block created by `on_propose` or `deliver_faulty`; used by verification and invariants |
+| actions | `main.qnt` | `sync_serve`, `sync_receive`, `sync_timeout`, `sync_status`, `deliver_faulty_sync`, `deliver_faulty_status` |
 
 **Byzantine servers.** `FAULTY` nodes do not run; `deliver_faulty_sync` picks, for an open request to a
 faulty node, one of: no reply, a forged block under the requested hash, a genuine but unrelated chain, a
@@ -334,8 +334,16 @@ flight (the peer had its chance and failed), mirroring `view_timer_ready_fair`. 
 
 The demonstration client (`serve_requests` over the union of all storages) is removed.
 
-**Peer selection in the model.** The Quint model still predates Section 4.6: its QCs carry an explicit
-signer set and the client asks the signers. Statuses, `NotFound` and the committee round are not modeled yet.
+**Peer selection in the model.** `blocksync.qnt` follows Section 4.6: the author first, then up to `f+1`
+status candidates, then committee rounds; servers answer `NotFound`. Simplifications:
+
+- the order of candidates is a rotation from a nondeterministic seed; scores (4.7) are not modeled, since
+  they only reorder candidates and the seed already covers every starting point;
+- `SyncStatus` is delivered at once (`announce`); a late status equals an earlier one, because the client
+  keeps the highest height. Faulty nodes announce any height (`deliver_faulty_status`);
+- `STATUS_TTL`, `SCORE_TTL`, `StatusRequest` and `STATUS_WAIT` are not modeled: there is no clock, and
+  without them round 0 just has fewer candidates;
+- faulty nodes may also answer a false `NotFound`.
 
 **Models.** The existing models set `|FAULTY| = f` (`n4f1v*`, `n7f2v6`), so the correct nodes are exactly a
 quorum: a block that one correct node missed cannot get a QC, and blocksync is never triggered (0 requests in
@@ -370,7 +378,7 @@ Implemented in `docs/spec/quint` (`main.qnt`, `scenarios_test.qnt`, `tools/mutan
 |---|---|
 | `stored_ancestry_inv` | every stored block except genesis has its parent stored |
 | `stored_genuine_inv` | every block stored by a correct node is in `minted` |
-| `request_gate_inv` | every open fetch has a valid QC for its hash, and its `peer` is a signer of that QC other than the node |
+| `request_gate_inv` | every open fetch has a valid QC for its hash, and neither its `peer` nor its queue contains the node itself |
 | `synced_certified_inv` | every queued `BlockSynced` block is certified (some QC references it) |
 | existing `safety_inv` | keeps holding with blocksync enabled |
 
@@ -389,8 +397,9 @@ than invariants: neither is visible in the state after the step.
 | name | statement |
 |---|---|
 | `sync_delivery_witness` | some correct node got a block from blocksync |
-| `sync_retry_witness` | some fetch timed out and went to another signer |
+| `sync_retry_witness` | some fetch went to another peer (timeout, invalid response or `NotFound`) |
 | `sync_reject_witness` | some response failed verification |
+| `sync_not_found_witness` | some peer answered `NotFound` |
 
 ### Liveness (R3)
 

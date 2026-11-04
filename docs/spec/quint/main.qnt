@@ -75,12 +75,15 @@ module main {
 
   pure val no_client_result: ClientResult = { blocksync: init_blocksync, packets: Set(), inputs: [] }
 
-  action apply_step(id: NodeID): bool =
+  pure val SEEDS: Set[int] = 0.to(committee_size - 1)
+
+  action apply_step(id: NodeID): bool = {
+    nondet seed = SEEDS.oneOf()
     val node = nodes.get(id)
     val r = apply_state(node, net)
     val known = known_hashes(r.state.kv, r.state.queue)
     val missing = match r.out {
-      | MissingBlock(m) => on_missing(syncs.get(id), id, known, m.qc, m.parked)
+      | MissingBlock(m) => on_missing(syncs.get(id), id, known, m.qc, m.height, m.parked, seed)
       | NoSmOutput => no_client_result.with("blocksync", syncs.get(id))
     }
     val tidied = tidy(missing.blocksync, known, r.state.kv.block_by_hash.keys())
@@ -95,6 +98,7 @@ module main {
       sync_net' = sync_net.union(missing.packets),
       minted' = minted.union(proposed_blocks(r.net)),
     }
+  }
 
   // Applies a client result of node `id`: inputs to the front of its queue, packets to the network.
   action apply_client(id: NodeID, res: ClientResult, consumed: Set[SyncPacket]): bool =
@@ -134,9 +138,10 @@ module main {
   action sync_receive(id: NodeID): bool = all {
     responses_to(id).size() > 0,
     nondet p = responses_to(id).oneOf()
+    nondet seed = SEEDS.oneOf()
     val node = nodes.get(id)
     val known = known_hashes(node.kv, node.queue)
-    apply_client(id, on_response(syncs.get(id), id, known, node.kv.block_by_hash.keys(), minted, p), Set(p)),
+    apply_client(id, on_response(syncs.get(id), id, known, node.kv.block_by_hash.keys(), minted, p, seed), Set(p)),
   }
 
   def in_flight(id: NodeID, hash: Hash): bool =
@@ -150,13 +155,14 @@ module main {
       },
     })
 
-  // A fetch of `id` times out and goes to the next signer.
+  // A fetch of `id` times out and goes to the next peer.
   action sync_timeout(id: NodeID, fair: bool): bool =
     val ready = syncs.get(id).fetches.keys().filter(h => not(fair) or not(in_flight(id, h)))
     all {
       ready.size() > 0,
       nondet hash = ready.oneOf()
-      apply_client(id, on_timeout(syncs.get(id), id, hash), Set()),
+      nondet seed = SEEDS.oneOf()
+      apply_client(id, on_timeout(syncs.get(id), id, hash, seed), Set()),
     }
 
   def sync_timeout_ready_fair(id: NodeID): bool =
@@ -178,14 +184,19 @@ module main {
     val unrelated = blocks.keys().exclude(Set(hash)).map(h => [blocks.get(h)])
     Set([]).union(genuine).union(forged).union(unrelated)
 
-  // A faulty node answers any open request: its own (consuming it) or someone else's (unsolicited).
+  // A faulty node answers any open request: its own (consuming it) or someone else's (unsolicited),
+  // with blocks or with a false NotFound.
   action deliver_faulty_sync: bool = all {
     FAULTY.size() > 0,
     sync_net.exists(p => is_request(p)),
     nondet p = sync_net.filter(p => is_request(p)).oneOf()
     nondet from = FAULTY.oneOf()
-    nondet blocks = faulty_responses(packet_hash(p)).oneOf()
-    val resp = { from: from, to: p.from, msg: BlockResponse({ hash: packet_hash(p), attempt: packet_attempt(p), blocks: blocks }) }
+    val h = packet_hash(p)
+    val a = packet_attempt(p)
+    val msgs = faulty_responses(h).map(blocks => BlockResponse({ hash: h, attempt: a, blocks: blocks }))
+      .union(Set(NotFound({ hash: h, attempt: a })))
+    nondet msg = msgs.oneOf()
+    val resp = { from: from, to: p.from, msg: msg }
     all {
       nodes' = nodes,
       prev_nodes' = nodes,
@@ -198,10 +209,40 @@ module main {
     },
   }
 
+  // `from` announces `height` to `receiver`. Delivery is immediate: a status that would arrive late is
+  // the same as an earlier announcement, since the client keeps the highest height.
+  action announce(from: NodeID, receiver: NodeID, height: Height): bool = all {
+    nodes' = nodes,
+    prev_nodes' = nodes,
+    net' = net,
+    qc_views' = qc_views,
+    all_qcs' = all_qcs,
+    syncs' = syncs.put(receiver, on_sync_status(syncs.get(receiver), from, height)),
+    sync_net' = sync_net,
+    minted' = minted,
+  }
+
+  // The periodic SyncStatus of a correct node: the height of its highest stored block.
+  action sync_status(id: NodeID): bool = all {
+    RUNNING.exclude(Set(id)).size() > 0,
+    nondet receiver = RUNNING.exclude(Set(id)).oneOf()
+    announce(id, receiver, top_height(nodes.get(id).kv)),
+  }
+
+  // A faulty node announces any height.
+  action deliver_faulty_status: bool = all {
+    FAULTY.size() > 0,
+    nondet from = FAULTY.oneOf()
+    nondet receiver = RUNNING.oneOf()
+    nondet height = 0.to(MAX_VIEW + 1).oneOf()
+    announce(from, receiver, height),
+  }
+
   action sync_step(id: NodeID, fair: bool): bool = any {
     sync_serve(id),
     sync_receive(id),
     sync_timeout(id, fair),
+    sync_status(id),
   }
 
   action enqueue_timer(id: NodeID, node: NodeState, input: DriverInput): bool = all {
@@ -305,9 +346,11 @@ module main {
       all { dice < TIMER_PERCENT, fire_view_timer(id) },
       all { dice < TIMER_PERCENT, fire_lock_timer(id) },
       all { dice < FAULTY_PERCENT, deliver_faulty_sync },
+      all { dice < FAULTY_PERCENT, deliver_faulty_status },
       sync_serve(id),
       sync_receive(id),
       all { dice < TIMER_PERCENT, sync_timeout(id, false) },
+      all { dice < TIMER_PERCENT, sync_status(id) },
     }
   }
 
@@ -368,9 +411,11 @@ module main {
       all { view_timer_ready_fair(id), fire_view_timer(id) },
       fire_lock_timer(id),
       all { dice < FAULTY_PERCENT, deliver_faulty_sync },
+      all { dice < FAULTY_PERCENT, deliver_faulty_status },
       sync_serve(id),
       sync_receive(id),
       sync_timeout(id, true),
+      all { dice < TIMER_PERCENT, sync_status(id) },
     }
   }
 
@@ -414,8 +459,9 @@ module main {
     fetches.keys().forall(h => and {
       is_valid_qc(fetches.get(h).qc),
       fetches.get(h).qc.block == h,
-      signers(fetches.get(h).qc).contains(fetches.get(h).peer),
+      NODES.contains(fetches.get(h).peer),
       fetches.get(h).peer != id,
+      fetches.get(h).queue.indices().forall(i => fetches.get(h).queue[i] != id),
     }))
 
   // Blocksync only delivers certified blocks: every queued BlockSynced has a QC somewhere.
@@ -446,12 +492,14 @@ module main {
   }
 
   // Blocksync witnesses (quint run --witnesses): a block was delivered, a fetch was retried,
-  // a response was rejected by verification.
+  // a response was rejected by verification, a peer answered NotFound.
   val sync_delivery_witness = CORRECT.exists(id => syncs.get(id).delivered > 0)
 
   val sync_retry_witness = CORRECT.exists(id => syncs.get(id).retries > 0)
 
   val sync_reject_witness = CORRECT.exists(id => syncs.get(id).rejected > 0)
+
+  val sync_not_found_witness = CORRECT.exists(id => syncs.get(id).not_found > 0)
 
   val no_commit_witness = CORRECT.forall(id => nodes.get(id).kv.committed_branch.length() == 0)
 

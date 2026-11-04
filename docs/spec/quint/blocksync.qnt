@@ -2,9 +2,11 @@ module blocksync {
   import types.* from "./types"
   import storage.* from "./storage"
   import driver.* from "./driver"
+  import pacemaker.* from "./pacemaker"
 
   // See docs/research/blocksync/design.md. A node fetches a block only when it holds a valid QC
-  // for it and asks the signers of that QC; responses are verified and delivered bottom-up.
+  // for it. It asks the author of the block first, then peers whose status reaches the block's
+  // height, then the whole committee; responses are verified and delivered bottom-up.
 
   // Small on purpose: chains longer than one response exercise the walk back (T3).
   pure val MAX_BLOCKS: int = 2
@@ -12,6 +14,7 @@ module blocksync {
   type SyncMsg =
   | BlockRequest({ hash: Hash, attempt: int, max: int })
   | BlockResponse({ hash: Hash, attempt: int, blocks: List[Block] })
+  | NotFound({ hash: Hash, attempt: int })
 
   type SyncPacket = {
     from: NodeID,
@@ -21,7 +24,12 @@ module blocksync {
 
   type Fetch = {
     qc: CertifiedBlock,
-    tried: Set[NodeID],
+    // height of the missing block, exact or a lower bound (T2)
+    height: Height,
+    // peers still to ask in the current round
+    queue: List[NodeID],
+    // 0: the author and status candidates; from 1 on: the whole committee
+    round: int,
     peer: NodeID,
     attempt: int,
   }
@@ -32,20 +40,25 @@ module blocksync {
     buffered: Hash -> Block,
     // proposals waiting for their parent
     parked: Hash -> List[DriverInput],
+    // highest height announced by each peer
+    statuses: NodeID -> Height,
 
     // ghost counters for witnesses
     delivered: int,
     retries: int,
     rejected: int,
+    not_found: int,
   }
 
   pure val init_blocksync: BlockSync = {
     fetches: Map(),
     buffered: Map(),
     parked: Map(),
+    statuses: Map(),
     delivered: 0,
     retries: 0,
     rejected: 0,
+    not_found: 0,
   }
 
   type ClientResult = {
@@ -53,13 +66,6 @@ module blocksync {
     packets: Set[SyncPacket],
     inputs: List[DriverInput],
   }
-
-  pure def signers(qc: CertifiedBlock): Set[NodeID] =
-    match qc.certificate.signature {
-      | QuorumCert(s) => s
-      | OneHonestCert(s) => s
-      | InvalidCert => Set()
-    }
 
   pure def remove_key(m: a -> b, k: a): a -> b =
     m.keys().exclude(Set(k)).mapBy(x => m.get(x))
@@ -74,31 +80,56 @@ module blocksync {
       | _ => acc
     })
 
-  // Deterministic rotation over the candidates, offset by the hash so that different fetches
-  // start from different signers.
-  pure def pick(candidates: Set[NodeID], hash: Hash, attempt: int): NodeID =
-    val offset = (hash + attempt) % committee_size
-    candidates.fold(-1, (best, x) =>
-      if (best == -1 or (x - offset + committee_size) % committee_size < (best - offset + committee_size) % committee_size)
-        x
-      else
-        best)
+  pure def top_height(kv: KVStorage): Height =
+    kv.block_by_hash.keys().fold(0, (acc, h) => if (kv.block_by_hash.get(h).height > acc) kv.block_by_hash.get(h).height else acc)
+
+  // `candidates` in the order of a rotation that starts at `seed`. The seed is chosen
+  // nondeterministically, so the model covers every starting point; the score-weighted order of
+  // the design is not modeled, it only reorders candidates.
+  pure def rotation(candidates: Set[NodeID], seed: int): List[NodeID] =
+    range(0, committee_size).foldl([], (acc, k) =>
+      val x = (seed + k) % committee_size
+      if (candidates.contains(x)) acc.append(x) else acc)
+
+  pure def status_candidates(bs: BlockSync, me: NodeID, height: Height): Set[NodeID] =
+    bs.statuses.keys().filter(p => p != me and bs.statuses.get(p) >= height)
+
+  // Round 0: the author, then f+1 status candidates (all of them if there are fewer).
+  pure def first_round(bs: BlockSync, me: NodeID, height: Height, author: NodeID, seed: int): List[NodeID] =
+    val first = if (author != me) [author] else []
+    val rest = rotation(status_candidates(bs, me, height).exclude(Set(author)), seed)
+    val n = faulty(committee_size) + 1
+    first.concat(if (rest.length() > n) rest.slice(0, n) else rest)
+
+  pure def committee_round(me: NodeID, seed: int): List[NodeID] =
+    rotation(0.to(committee_size - 1).exclude(Set(me)), seed)
+
+  // The author of a missing block: the sender of the parked proposal (T1) or the leader of the
+  // view of its QC (T2, T3).
+  pure def author_of(qc: CertifiedBlock, parked: List[DriverInput]): NodeID =
+    if (parked.length() > 0)
+      match parked[0] {
+        | NewProposal(signed) => signed.sender
+        | _ => leader(qc.view)
+      }
+    else
+      leader(qc.view)
 
   pure def request(me: NodeID, hash: Hash, f: Fetch): SyncPacket =
     { from: me, to: f.peer, msg: BlockRequest({ hash: hash, attempt: f.attempt, max: MAX_BLOCKS }) }
 
-  // Sends the request of `hash` to the next signer; starts a new round once every signer was tried.
-  pure def next_attempt(bs: BlockSync, me: NodeID, hash: Hash, qc: CertifiedBlock, tried: Set[NodeID], attempt: int): ClientResult =
-    val all_peers = signers(qc).exclude(Set(me))
-    val fresh = all_peers.exclude(tried)
-    val round = if (fresh.size() > 0) tried else Set()
-    val candidates = if (fresh.size() > 0) fresh else all_peers
-    if (candidates.size() == 0)
+  // Sends the request of `hash` to the next peer of the queue; an empty queue starts a committee round.
+  pure def send_next(bs: BlockSync, me: NodeID, hash: Hash, qc: CertifiedBlock, height: Height, queue: List[NodeID], round: int, attempt: int, seed: int): ClientResult =
+    val refill = queue.length() == 0
+    val q = if (refill) committee_round(me, seed) else queue
+    if (q.length() == 0)
       { blocksync: bs.with("fetches", remove_key(bs.fetches, hash)), packets: Set(), inputs: [] }
     else
-      val peer = pick(candidates, hash, attempt)
-      val f = { qc: qc, tried: round.union(Set(peer)), peer: peer, attempt: attempt }
+      val f = { qc: qc, height: height, queue: q.tail(), round: if (refill) round + 1 else round, peer: q.head(), attempt: attempt }
       { blocksync: bs.with("fetches", bs.fetches.put(hash, f)), packets: Set(request(me, hash, f)), inputs: [] }
+
+  pure def start_fetch(bs: BlockSync, me: NodeID, hash: Hash, qc: CertifiedBlock, height: Height, author: NodeID, seed: int): ClientResult =
+    send_next(bs, me, hash, qc, height, first_round(bs, me, height, author, seed), 0, 0, seed)
 
   pure def park(bs: BlockSync, hash: Hash, parked: List[DriverInput]): BlockSync =
     if (parked.length() == 0)
@@ -108,18 +139,22 @@ module blocksync {
       bs.with("parked", bs.parked.put(hash, prev.concat(parked)))
 
   // MissingBlock(qc): the state machine has already checked that the QC is valid.
-  pure def on_missing(bs: BlockSync, me: NodeID, known: Set[Hash], qc: CertifiedBlock, parked: List[DriverInput]): ClientResult =
+  pure def on_missing(bs: BlockSync, me: NodeID, known: Set[Hash], qc: CertifiedBlock, height: Height, parked: List[DriverInput], seed: int): ClientResult =
     val hash = qc.block
     val parked_bs = park(bs, hash, parked)
     if (known.contains(hash) or bs.fetches.keys().contains(hash) or bs.buffered.keys().contains(hash))
       { blocksync: parked_bs, packets: Set(), inputs: [] }
     else
-      next_attempt(parked_bs, me, hash, qc, Set(), 0)
+      start_fetch(parked_bs, me, hash, qc, height, author_of(qc, parked), seed)
 
-  pure def on_timeout(bs: BlockSync, me: NodeID, hash: Hash): ClientResult =
+  pure def on_timeout(bs: BlockSync, me: NodeID, hash: Hash, seed: int): ClientResult =
     val f = bs.fetches.get(hash)
-    val res = next_attempt(bs, me, hash, f.qc, f.tried, f.attempt + 1)
+    val res = send_next(bs, me, hash, f.qc, f.height, f.queue, f.round, f.attempt + 1, seed)
     res.with("blocksync", res.blocksync.with("retries", res.blocksync.retries + 1))
+
+  pure def on_sync_status(bs: BlockSync, from: NodeID, height: Height): BlockSync =
+    val prev = if (bs.statuses.keys().contains(from)) bs.statuses.get(from) else -1
+    bs.with("statuses", bs.statuses.put(from, if (height > prev) height else prev))
 
   // A response for `hash` is a chain b_0, b_1, ... going down from the requested block.
   // `genuine` stands for hash integrity: every block is the one its hash commits to.
@@ -162,18 +197,27 @@ module blocksync {
       inputs: chain.inputs.concat(parked_inputs),
     }
 
-  pure def on_response(bs: BlockSync, me: NodeID, known: Set[Hash], stored: Set[Hash], genuine: Set[Block], packet: SyncPacket): ClientResult =
+  pure def expected(bs: BlockSync, from: NodeID, hash: Hash, attempt: int): bool =
+    and {
+      bs.fetches.keys().contains(hash),
+      bs.fetches.get(hash).peer == from,
+      bs.fetches.get(hash).attempt == attempt,
+    }
+
+  pure def on_response(bs: BlockSync, me: NodeID, known: Set[Hash], stored: Set[Hash], genuine: Set[Block], packet: SyncPacket, seed: int): ClientResult =
     match packet.msg {
+      | NotFound(nf) =>
+        if (not(expected(bs, packet.from, nf.hash, nf.attempt)))
+          { blocksync: bs, packets: Set(), inputs: [] }
+        else
+          // No timeout to wait for: the next peer is asked at once.
+          val res = on_timeout(bs, me, nf.hash, seed)
+          res.with("blocksync", res.blocksync.with("not_found", res.blocksync.not_found + 1))
       | BlockResponse(resp) =>
-        val expected = and {
-          bs.fetches.keys().contains(resp.hash),
-          bs.fetches.get(resp.hash).peer == packet.from,
-          bs.fetches.get(resp.hash).attempt == resp.attempt,
-        }
-        if (not(expected))
+        if (not(expected(bs, packet.from, resp.hash, resp.attempt)))
           { blocksync: bs, packets: Set(), inputs: [] }
         else if (not(valid_chain(resp.hash, resp.blocks, genuine)))
-          val res = on_timeout(bs, me, resp.hash)
+          val res = on_timeout(bs, me, resp.hash, seed)
           res.with("blocksync", res.blocksync.with("rejected", res.blocksync.rejected + 1))
         else
           // The response may reach blocks the node already has (down to genesis): keep only new ones.
@@ -184,8 +228,8 @@ module blocksync {
           if (fresh.length() == 0 or known.contains(low.parent) or buffered.keys().contains(low.parent))
             release(stored_bs, known, stored)
           else
-            // T3: walk back, the block's own QC names the peers.
-            next_attempt(stored_bs, me, low.parent, low.justify, Set(), 0)
+            // T3: walk back; the block's own QC certifies its parent.
+            start_fetch(stored_bs, me, low.parent, low.justify, low.height - 1, leader(low.justify.view), seed)
       | _ => { blocksync: bs, packets: Set(), inputs: [] }
     }
 
@@ -201,7 +245,7 @@ module blocksync {
           | Some(b) =>
             val max = if (req.max < MAX_BLOCKS) req.max else MAX_BLOCKS
             Set({ from: me, to: packet.from, msg: BlockResponse({ hash: req.hash, attempt: req.attempt, blocks: get_block_branch(b, kv, max) }) })
-          | None => Set()
+          | None => Set({ from: me, to: packet.from, msg: NotFound({ hash: req.hash, attempt: req.attempt }) })
         }
       | _ => Set()
     }
@@ -218,11 +262,13 @@ module blocksync {
     match p.msg {
       | BlockRequest(r) => r.hash
       | BlockResponse(r) => r.hash
+      | NotFound(r) => r.hash
     }
 
   pure def packet_attempt(p: SyncPacket): int =
     match p.msg {
       | BlockRequest(r) => r.attempt
       | BlockResponse(r) => r.attempt
+      | NotFound(r) => r.attempt
     }
 }

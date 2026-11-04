@@ -19,7 +19,7 @@ module state_machine {
 
   type SmOutput =
   | NoSmOutput
-  | MissingBlock({ qc: CertifiedBlock, parked: List[DriverInput] })
+  | MissingBlock({ qc: CertifiedBlock, height: Height, parked: List[DriverInput] })
 
   type StepResult = {
     state: NodeState,
@@ -84,15 +84,17 @@ module state_machine {
           block.parent == block.justify.block,
           get_block_by_hash(kv, block.parent) == None,
         }
-        if (gated) MissingBlock({ qc: block.justify, parked: [input] }) else NoSmOutput
+        if (gated) MissingBlock({ qc: block.justify, height: block.height - 1, parked: [input] }) else NoSmOutput
       | _ => NoSmOutput
     }
 
-  // T2: the node learned a QC (from a status or a proposal) whose block it does not store.
+  // T2: the node learned a QC (from a status or a proposal) whose block it does not store. The
+  // height of the block is unknown; one above the highest stored block is a lower bound.
   pure def check_missing_high_qc(d: Driver, kv: KVStorage): SmOutput =
     val high_qc = d.pacemaker.get_high_qc()
     if (get_block_by_hash(kv, high_qc.block) == None)
-      MissingBlock({ qc: high_qc, parked: [] })
+      val top = kv.block_by_hash.keys().fold(0, (acc, h) => if (kv.block_by_hash.get(h).height > acc) kv.block_by_hash.get(h).height else acc)
+      MissingBlock({ qc: high_qc, height: top + 1, parked: [] })
     else
       NoSmOutput
 

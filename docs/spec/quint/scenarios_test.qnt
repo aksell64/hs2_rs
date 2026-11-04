@@ -166,7 +166,7 @@ module scenariosTest {
     val bad_qc = b2.with("justify", qc_of_b1.with("certificate", { signature: QuorumCert(Set(1)) }))
     val other_parent = b2.with("justify", GENESIS_QC)
     init
-      .expect(check_missing_parent(genesis_kv, leader_proposal) == MissingBlock({ qc: qc_of_b1, parked: [leader_proposal] }))
+      .expect(check_missing_parent(genesis_kv, leader_proposal) == MissingBlock({ qc: qc_of_b1, height: 1, parked: [leader_proposal] }))
       .expect(check_missing_parent(genesis_kv, proposal_of(1, b2, 2)) == NoSmOutput)
       .expect(check_missing_parent(genesis_kv, proposal_of(2, bad_qc, 2)) == NoSmOutput)
       .expect(check_missing_parent(genesis_kv, proposal_of(2, other_parent, 2)) == NoSmOutput)
