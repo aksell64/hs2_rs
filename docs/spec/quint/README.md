@@ -24,7 +24,9 @@ It’s better to set `--max-steps` > 500 so that committed blocks appear in suff
 
 Options:
 
-- `--main` — configuration from `models.qnt` (`n4f1v6`, `n4f1v20`, `n7f2v6`).
+- `--main` — configuration from `models.qnt` (`n4f1v6`, `n4f1v20`, `n7f2v6`, `n4f0v20`, `n4f0v20t`, `n7f1v12`).
+  With `f` faulty nodes the correct ones are exactly a quorum, so a block missed by one of them is never
+  certified and blocksync is never used; use `n4f0v20t` or `n7f1v12` to exercise blocksync.
 - `--step` — `step_fair` (fairness assumption: a view timer fires only after the leader of the view has proposed
   and the node has processed its messages; gives commits and progress)
   or `step` (timers fire at any time, for safety without any timing assumption).
@@ -82,6 +84,8 @@ The test module uses `n = 4` with `n0` faulty and silent, so views 1, 2 and 3 ha
 | `proposalFromNonLeaderIsIgnoredTest` | after view 1 the faulty `n0` sends `n1` a proposal for view 2 built on the real QC(1); the leader of view 2 is `n2` | `n1` drops it without voting and without taking its QC, then votes for the real proposal of `n2` |
 | `lockNeverDecreasesTest` | after view 2 `n1` gets a second proposal of `n3` for view 3 built on the genesis QC; it is buffered, replayed after the real one and rejected | the rejected block still reaches `update`, and the lock of `n1` stays at QC(2) |
 | `voteRespectsLockTest` | after view 2 `n1` (locked on QC(1)) gets a second proposal of `n3` for view 3 built on the genesis QC; its view timer moves it to view 3 before it handles the real proposal | `n1` rejects the fake block (no vote), then votes for the real one and locks on QC(2) |
+| `syncGateTest` | pure check of `check_missing_parent` on proposals whose parent is missing | blocksync is asked only for a leader's proposal with a valid QC that certifies the parent |
+| `blockSyncedStoresWithoutVoteTest` | pure check of the driver on `BlockSynced` | the block is stored and its QC raises `high_qc`, no vote is sent; a block with an unknown parent is not stored |
 
 Helpers: `happy_view(v)` runs the correct nodes until the leader of `v + 1` has built QC(v) and proposed;
 `happy_until(v)` runs views `1, ..., v - 1`; `inject(id, packet)` puts a message of a faulty node into the queue of `id`;
@@ -115,6 +119,12 @@ silent               byz=[3]   safety_inv               success   deviated in 30
 tail_fork            byz=[3]   safety_inv               success   deviated in 295 of 300 traces seed=0xa6e4bc4641eff513
                      tail_fork_witness in 276 of 300 traces
 equivocate           byz=[3]   safety_inv               success   deviated in 292 of 300 traces seed=0x6bb215d4cb32197f
+forging_server       byz=[3]   safety_inv               success   deviated in 69 of 300 traces seed=0xc30f779cbd4f93b3
+                     sync_reject_witness in 53 of 300 traces
+no_hash_check_vs_forging byz=[3]   stored_genuine_inv       success   deviated in 17 of 300 traces seed=0x3d1f96f09a3a1c74
+top_down_delivery    all       stored_ancestry_inv      success   seed=0xe7a420ab6c330604
+no_request_gate      all       syncGateTest             success   seed=0x73bbebe8cba81d1b
+vote_on_synced       all       blockSyncedStoresWithoutVoteTest success   seed=0xe644010791426af7
 ```
 
 Options:
@@ -186,6 +196,11 @@ Mutants:
 - [`silent`](tools/mutants/silent.md) — byzantine 3, safety_inv, expect safe
 - [`tail_fork`](tools/mutants/tail_fork.md) — byzantine 3, safety_inv, expect safe
 - [`vote_past_lock`](tools/mutants/vote_past_lock.md) — byzantine 3, safety_inv, expect safe
+- [`forging_server`](tools/mutants/forging_server.md) — byzantine 3, safety_inv, expect safe
+- [`no_hash_check_vs_forging`](tools/mutants/no_hash_check_vs_forging.md) — byzantine 3, stored_genuine_inv, expect violation
+- [`top_down_delivery`](tools/mutants/top_down_delivery.md) — all, n4f0v20t, stored_ancestry_inv, expect violation
+- [`no_request_gate`](tools/mutants/no_request_gate.md) — all, syncGateTest, expect violation
+- [`vote_on_synced`](tools/mutants/vote_on_synced.md) — all, blockSyncedStoresWithoutVoteTest, expect violation
 
 `once_qc_in_view_inv` has no calibrating mutant: the vote collector keeps one vote per sender and at most one QC
 per view, so a correct leader never builds a second QC in a view even if correct nodes vote twice

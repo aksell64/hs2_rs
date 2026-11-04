@@ -19,7 +19,7 @@ module state_machine {
 
   type SmOutput =
   | NoSmOutput
-  | MissingBlock(Hash)
+  | MissingBlock({ qc: CertifiedBlock, height: Height, parked: List[DriverInput] })
 
   type StepResult = {
     state: NodeState,
@@ -71,16 +71,32 @@ module state_machine {
       | ClearViewTimersBelow(v) => state.with("view_timers", state.view_timers.filter(w => w >= v))
     }
 
+  // T1, the request gate: a proposal of the leader whose parent is certified by its own valid QC
+  // and missing. The proposal is parked until the parent is synced. Any other proposal goes to
+  // the driver, which rejects it if it is invalid.
   pure def check_missing_parent(kv: KVStorage, input: DriverInput): SmOutput =
     match input {
       | NewProposal(signed) =>
-        val parent = signed.proposal.block.parent
-        match get_block_by_hash(kv, parent) {
-          | Some(_) => NoSmOutput
-          | None => MissingBlock(parent)
+        val block = signed.proposal.block
+        val gated = and {
+          signed.sender == leader(signed.proposal.view),
+          is_valid_qc(block.justify),
+          block.parent == block.justify.block,
+          get_block_by_hash(kv, block.parent) == None,
         }
+        if (gated) MissingBlock({ qc: block.justify, height: block.height - 1, parked: [input] }) else NoSmOutput
       | _ => NoSmOutput
     }
+
+  // T2: the node learned a QC (from a status or a proposal) whose block it does not store. The
+  // height of the block is unknown; one above the highest stored block is a lower bound.
+  pure def check_missing_high_qc(d: Driver, kv: KVStorage): SmOutput =
+    val high_qc = d.pacemaker.get_high_qc()
+    if (get_block_by_hash(kv, high_qc.block) == None)
+      val top = kv.block_by_hash.keys().fold(0, (acc, h) => if (kv.block_by_hash.get(h).height > acc) kv.block_by_hash.get(h).height else acc)
+      MissingBlock({ qc: high_qc, height: top + 1, parked: [] })
+    else
+      NoSmOutput
 
   pure def apply_state(state: NodeState, net: Network): StepResult =
     val received = pop_from_network(state, net)
@@ -103,7 +119,7 @@ module state_machine {
           {
             state: timed,
             net: res.net.foldl(received.net, (acc, env) => send(acc, state.node_id, env.to, env.msg)),
-            out: NoSmOutput,
+            out: check_missing_high_qc(res.driver, res.kv),
           }
       | None => { state: popped.state, net: received.net, out: NoSmOutput }
     }
