@@ -36,8 +36,15 @@ pub struct TestAggregate {
 
 impl AggregateSignature for TestAggregate {}
 
+impl TestAggregate {
+    pub fn signers(&self) -> &BTreeSet<NodeID> {
+        &self.signers
+    }
+}
+
 pub struct TestScheme {
     pub n: u32,
+    pub id: Option<NodeID>,
 }
 
 impl Scheme for TestScheme {
@@ -56,7 +63,7 @@ impl Scheme for TestScheme {
     }
 
     fn sign(&self, _: TestDigest) -> Option<PartialSignature<TestSignature>> {
-        None
+        self.id.map(|id| PartialSignature::new(id, TestSignature))
     }
 
     fn verify_partial(&self, _: TestDigest, _: &PartialSignature<TestSignature>) -> bool {

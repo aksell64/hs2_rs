@@ -20,7 +20,7 @@ pub trait ReadStorage<S: Scheme, C: Command> {
     fn get_exec_hash(&self) -> Result<S::Digest, KVError>;
     fn get_cur_view(&self) -> Result<View, KVError>;
     fn get_cur_leader(&self) -> Result<NodeID, KVError>;
-    fn get_proposed(&self) -> Result<bool, KVError>;
+    fn get_proposed_view(&self) -> Result<View, KVError>;
     fn get_block_branch(
         &self,
         block: Block<S, C>,
@@ -65,7 +65,7 @@ pub trait WriteStorage<S: Scheme, C: Command> {
     fn update_exec_hash(&mut self, hash: S::Digest) -> Result<(), KVError>;
     fn update_cur_view(&mut self, view: View) -> Result<(), KVError>;
     fn update_cur_leader(&mut self, leader: NodeID) -> Result<(), KVError>;
-    fn update_proposed(&mut self, proposed: bool) -> Result<(), KVError>;
+    fn update_proposed_view(&mut self, view: View) -> Result<(), KVError>;
 }
 
 pub trait ReadWriteStorage<S: Scheme, C: Command>: ReadStorage<S, C> + WriteStorage<S, C> {}

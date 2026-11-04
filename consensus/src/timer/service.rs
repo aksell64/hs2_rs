@@ -1,5 +1,5 @@
 use crate::timer::queue::TimerQueue;
-use crate::types::clock::{Clock, Source};
+use crate::types::clock::{Clock, ClockSource};
 use crate::types::{EpochTimeouts, View, ViewTimeout};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -40,7 +40,7 @@ impl Clock for Instant {
 
 pub struct TokioSource;
 
-impl Source for TokioSource {
+impl ClockSource for TokioSource {
     type Clock = Instant;
 
     fn now(&self) -> Instant {

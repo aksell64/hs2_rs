@@ -1,0 +1,13 @@
+[package]
+name = "tob"
+description = "Total-order broadcast on top of the HotStuff-2 node: an in-process cluster."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+hotstuff-consensus = { workspace = true, features = ["testing"] }
+hotstuff-types.workspace = true
+codec = { package = "parity-scale-codec", version = "3.0", default-features = false, features = ["derive"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "sync"] }

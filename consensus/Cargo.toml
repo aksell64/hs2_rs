@@ -8,6 +8,7 @@ authors.workspace = true
 
 [features]
 testing = []
+mbt = ["testing"]
 
 [dependencies]
 hotstuff-types.workspace = true
@@ -18,4 +19,17 @@ tokio = { version = "1.53.2", features = ["macros", "time", "sync"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.2", features = ["rt", "macros"] }
+quint-connect = "0.1"
+itf = "0.4"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+
+[[test]]
+name = "e2e"
+required-features = ["testing"]
+
+[[test]]
+name = "mbt"
+path = "tests/mbt/main.rs"
+required-features = ["mbt"]
 

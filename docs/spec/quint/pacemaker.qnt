@@ -18,7 +18,7 @@ module pacemaker {
     high_qc: CertifiedBlock,
     cur_view: View,
     cur_leader: NodeID,
-    proposed: bool,
+    lock_expired: View,
     statuses: Set[NodeID],
     sent_wish: Set[View],
     relayed_tc: Set[View],
@@ -37,7 +37,7 @@ module pacemaker {
       high_qc: genesis_qc,
       cur_view: 0,
       cur_leader: leader(0),
-      proposed: false,
+      lock_expired: 0,
       statuses: Set(id),
       sent_wish: Set(),
       relayed_tc: Set(),
@@ -105,7 +105,6 @@ module pacemaker {
       val moved = pcm
         .with("cur_view", v)
         .with("cur_leader", leader(v))
-        .with("proposed", false)
         .with("statuses", Set(pcm.id))
         .with("scheduled_epoch", Some(epoch))
       val entered = enter_view(moved, v)
@@ -116,8 +115,8 @@ module pacemaker {
     if (v != pcm.cur_view)
       pacemaker_no_change(pcm)
     else if (pcm.id == leader(v))
-      if (pcm.high_qc.view == v - 1)
-        try_propose(pcm)
+      if (can_propose(pcm, v))
+        { pacemaker: pcm, effects: [], out: ProposeNow(v) }
       else
         { pacemaker: pcm, effects: [Timer(SetLockTimer(v))], out: NoPacemakerOutput }
     else if (pcm.high_qc.view != v - 1)
@@ -126,15 +125,12 @@ module pacemaker {
     else
       pacemaker_no_change(pcm)
 
-  pure def try_propose(pcm: Pacemaker): PacemakerResult =
-    if (pcm.proposed)
-      pacemaker_no_change(pcm)
-    else
-      { pacemaker: pcm.with("proposed", true), effects: [], out: ProposeNow(pcm.cur_view) }
+  pure def can_propose(pcm: Pacemaker, v: View): bool =
+    v == pcm.cur_view and pcm.id == leader(v) and (pcm.high_qc.view == v - 1 or pcm.lock_expired == v)
 
   pure def on_lock_timer_expired(pcm: Pacemaker, v: View): PacemakerResult =
     if (v == pcm.cur_view and pcm.id == leader(v))
-      try_propose(pcm)
+      { pacemaker: pcm.with("lock_expired", v), effects: [], out: ProposeNow(v) }
     else
       pacemaker_no_change(pcm)
 
