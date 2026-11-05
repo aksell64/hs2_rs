@@ -70,7 +70,20 @@ Renders the trace as markdown:
   Right, for the selected step: the action, the block tree (certified blocks bold, per-node chips
   `C` committed / `L` lock / `H` high_qc), the messages sent and received, and the state of every node with
   changed cells highlighted. Keys: `←` / `→` step, `shift+←` / `shift+→` previous / next step with the selected tag
-  (new QC, commit, view change, timer, faulty, dropped, blocksync), space plays, `#step=N` in the URL opens a step.
+  (new QC, commit, view change, timer, faulty, dropped, blocksync, mark), space plays, `#step=N` in the URL opens a step.
+  Drag the divider between the panels to resize them; the page remembers the width. Ctrl + wheel over the diagram
+  zooms the diagram only, around the cursor; drag it with the left mouse button to move around in any direction, past its edges too. The block tree zooms and
+  moves the same way, and its height is resizable.
+  Clicking a point fills the `What happened` card: the event, what the node sent and how its state changed.
+  `Why this step` rows expand to the same details, and `✕ clear highlight`, Esc or a click on empty space in the
+  diagram turns the highlighting off.
+  Every point has a short caption (`labels`), hidden when the rows get too dense for it.
+  Clicking the lane or the name of a node adds it to the selection, and only the messages and events of the selected
+  nodes stay highlighted; another click removes the node.
+  The selected step also shows the chain of messages that led to it (`chain`), and each lane is shaded by view with a
+  tick at every epoch start. `time axis` places the rows by simulated time, for traces that have it. Clicking a block
+  shows when it was proposed, certified and committed and highlights its messages. The `Progress` card plots the view
+  and the committed height of each node. The search box looks in the messages and in the point captions and highlights the matches: Enter jumps to the next one.
 - `--json` — the same data without the page; the page loads it with "Open trace…" or drag and drop.
 - `--shiviz` — a log for [ShiViz](https://bestchai.bitbucket.io/shiviz/) with vector clocks: paste it with the
   default parser regex.

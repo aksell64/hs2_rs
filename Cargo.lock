@@ -463,6 +463,7 @@ dependencies = [
  "parity-scale-codec",
  "quint-connect",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

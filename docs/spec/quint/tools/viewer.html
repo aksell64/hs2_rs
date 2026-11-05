@@ -7,7 +7,7 @@
 <style>
 :root {
   --bg: #f7f7f5; --panel: #ffffff; --fg: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc; --row: #f0efea;
-  --accent: #2f5fd0; --cur: #fff3c4; --changed: #ffe9a8;
+  --accent: #2f5fd0; --cur: #fff3c4; --changed: #ffe9a8; --mark: #d6246e; --bad: #c81e1e;
   --k-proposal: #2f5fd0; --k-vote: #1f9d6b; --k-wish: #c77a12; --k-tc: #c2410c; --k-status: #7c5cc4;
   --k-sync: #0e8aa0; --k-other: #888;
   --n0: #2f5fd0; --n1: #1f9d6b; --n2: #c2410c; --n3: #7c5cc4; --n4: #b8860b; --n5: #0e8aa0; --n6: #b03a7a;
@@ -15,7 +15,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #161615; --panel: #1f1f1d; --fg: #e8e7e2; --muted: #9a9993; --line: #34332f; --row: #262623;
-    --accent: #7ea2ff; --cur: #4a3f14; --changed: #5a4a12;
+    --accent: #7ea2ff; --cur: #4a3f14; --changed: #5a4a12; --mark: #ff5c93; --bad: #ff4d4d;
     --k-proposal: #7ea2ff; --k-vote: #4fd1a0; --k-wish: #f0a948; --k-tc: #ff8a5c; --k-status: #b49cff;
     --k-sync: #4cc7dc; --k-other: #999;
     --n0: #7ea2ff; --n1: #4fd1a0; --n2: #ff8a5c; --n3: #b49cff; --n4: #e6c15a; --n5: #4cc7dc; --n6: #f080b8;
@@ -23,7 +23,7 @@
 }
 :root[data-theme="dark"] {
   --bg: #161615; --panel: #1f1f1d; --fg: #e8e7e2; --muted: #9a9993; --line: #34332f; --row: #262623;
-  --accent: #7ea2ff; --cur: #4a3f14; --changed: #5a4a12;
+  --accent: #7ea2ff; --cur: #4a3f14; --changed: #5a4a12; --mark: #ff5c93; --bad: #ff4d4d;
   --k-proposal: #7ea2ff; --k-vote: #4fd1a0; --k-wish: #f0a948; --k-tc: #ff8a5c; --k-status: #b49cff;
   --k-sync: #4cc7dc; --k-other: #999;
   --n0: #7ea2ff; --n1: #4fd1a0; --n2: #ff8a5c; --n3: #b49cff; --n4: #e6c15a; --n5: #4cc7dc; --n6: #f080b8;
@@ -44,8 +44,14 @@ input[type=number] { width: 70px; }
 .legend { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); }
 .legend label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
-main { flex: 1; display: grid; grid-template-columns: minmax(280px, 38%) 1fr; min-height: 0; }
-#diagram { overflow: auto; border-right: 1px solid var(--line); background: var(--panel); position: relative; }
+main { flex: 1; display: grid; grid-template-columns: minmax(280px, var(--diagram-width, 38%)) 6px 1fr; min-height: 0; }
+#diagram { overflow: scroll; background: var(--panel); position: relative; }
+#diagram, #tree { user-select: none; cursor: grab; }
+#pan-area, #tree-area { width: max-content; }
+#pan-area svg, #tree-area svg { display: block; }
+.panning, .panning * { cursor: grabbing !important; }
+#splitter { background: var(--line); cursor: col-resize; touch-action: none; }
+#splitter:hover, #splitter.dragging { background: var(--muted); }
 #lanes { position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 2; height: 24px; }
 #detail { overflow: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
@@ -53,22 +59,47 @@ main { flex: 1; display: grid; grid-template-columns: minmax(280px, 38%) 1fr; mi
 .action { font-size: 14px; }
 .action code { background: var(--row); padding: 0 3px; border-radius: 3px; }
 .tag { display: inline-block; padding: 0 6px; border-radius: 10px; background: var(--row); border: 1px solid var(--line); color: var(--muted); font-size: 11px; margin-left: 4px; }
-#tree { overflow-x: auto; }
+#tree { overflow: scroll; height: 40vh; min-height: 200px; resize: vertical; }
 table { border-collapse: collapse; width: 100%; }
 th, td { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
 th { color: var(--muted); font-weight: 500; white-space: nowrap; }
 td { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-word; }
 td.changed { background: var(--changed); }
 .msgs div { padding: 2px 0; }
+.mark-label { font-size: 11px; font-weight: 700; fill: var(--mark); paint-order: stroke; stroke: var(--panel); stroke-width: 3px; }
+.mark-note { color: var(--mark); font-weight: 600; margin-top: 4px; }
+.caption-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.caption-row button { font-size: 12px; padding: 1px 8px; }
+.mark-label.violation { fill: var(--bad); }
+.mark-note.violation { color: var(--bad); }
+input[type=search] { font: inherit; color: inherit; background: var(--row); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; width: 170px; }
+.toggle { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); cursor: pointer; }
+.hop { padding: 2px 0; cursor: pointer; }
+.hop:hover { background: var(--row); }
+.hop-detail { margin: 2px 0 8px 16px; padding: 6px 10px; background: var(--row); border-radius: 6px; }
+.link { color: var(--accent); cursor: pointer; }
+#blockinfo { margin-top: 6px; }
+#progress { display: flex; gap: 10px; }
+#progress svg { display: block; cursor: crosshair; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+.kv .k { color: var(--muted); }
+.kv code { word-break: break-word; }
 .empty { color: var(--muted); }
 svg text { fill: var(--fg); }
-.row-hit { fill: transparent; cursor: pointer; }
+.row-hit { fill: transparent; }
 .row-hit:hover { fill: var(--row); }
-.tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; max-width: 520px; z-index: 10; display: none; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+.lane-hit { fill: transparent; cursor: pointer; }
+.lane-hit:hover { fill: rgba(127, 127, 127, .2); }
+.lane-name { cursor: pointer; }
+.step-label { font-size: 11px; fill: var(--fg); paint-order: stroke; stroke: var(--panel); stroke-width: 3px; pointer-events: none; }
+.tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--muted); border-radius: 8px; padding: 10px 14px; max-width: 680px; z-index: 10; display: none; box-shadow: 0 4px 16px rgba(0,0,0,.35); font-size: 16px; line-height: 1.5; }
+.tip code { font-size: 15px; }
+.tip .tag { font-size: 13px; }
 #drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.35); color: #fff; font-size: 18px; z-index: 20; }
 @media (max-width: 760px) {
   main { grid-template-columns: 1fr; grid-template-rows: 45vh auto; }
-  #diagram { border-right: 0; border-bottom: 1px solid var(--line); }
+  #diagram { border-bottom: 1px solid var(--line); }
+  #splitter { display: none; }
 }
 </style>
 </head>
@@ -90,18 +121,28 @@ svg text { fill: var(--fg); }
   <input type="number" id="stepnum" min="0" value="0">
   <select id="tagsel" title="Jump target for shift+← / shift+→">
     <option value="qc">new QC</option><option value="commit">commit</option><option value="view">view change</option>
-    <option value="timer">timer</option><option value="faulty">faulty</option><option value="drop">dropped</option><option value="sync">blocksync</option>
+    <option value="timer">timer</option><option value="faulty">faulty</option><option value="drop">dropped</option><option value="sync">blocksync</option><option value="mark">mark</option>
   </select>
   <button id="tprev" title="Previous tagged step (shift+←)">⇤</button>
   <button id="tnext" title="Next tagged step (shift+→)">⇥</button>
+  <input type="search" id="search" placeholder="search events…" title="Searches messages and point captions. Enter: next match, shift+Enter: previous, Esc: clear">
+  <span class="empty" id="searchinfo"></span>
+  <button id="clearHighlight" title="Remove the highlighted lines, the block selection and the search (Esc). Selecting a step highlights again.">✕ clear highlight</button>
+  <label class="toggle" title="Highlight the messages that led to the selected step"><input type="checkbox" id="chainToggle" checked>chain</label>
+  <label class="toggle" title="Show what happened next to every point"><input type="checkbox" id="labelsToggle" checked>labels</label>
+  <label class="toggle" id="timeLabel" title="Place the rows by simulated time"><input type="checkbox" id="timeToggle">time axis</label>
   <span class="legend" id="legend"></span>
 </div>
 <main>
-  <section id="diagram"><svg id="lanes"></svg><svg id="chart"></svg></section>
+  <section id="diagram"><div id="pan-area"><svg id="lanes"></svg><svg id="chart"></svg></div></section>
+  <div id="splitter" title="Drag to resize"></div>
   <section id="detail">
     <div class="card"><h2 id="steptitle">Step</h2><div class="action" id="action"></div></div>
-    <div class="card"><h2>Block tree</h2><div id="tree"></div><div class="legend" style="margin-top:6px">
-      bold = certified · dashed = no QC yet · filled = committed by all running nodes · chips: C committed, L lock, H high_qc</div></div>
+    <div class="card"><h2>Block tree</h2><div id="tree"><div id="tree-area"></div></div><div class="legend" style="margin-top:6px">
+      bold = certified · dashed = no QC yet · filled = committed by all running nodes · chips: C committed, L lock, H high_qc · click a block for details</div><div id="blockinfo"></div></div>
+    <div class="card"><h2>Progress</h2><div id="progress"></div><div class="legend" id="synccost" style="margin-top:6px"></div></div>
+    <div class="card" id="pointcard"><h2>What happened</h2><div class="kv" id="point"></div></div>
+    <div class="card" id="chaincard"><h2>Why this step</h2><div id="chain"></div></div>
     <div class="card"><h2>Messages this step</h2><div class="msgs" id="msgs"></div></div>
     <div class="card"><h2>Nodes</h2><table id="state"></table></div>
   </section>
@@ -113,7 +154,7 @@ const EMBEDDED = null;
 
 const KINDS = ['Proposal', 'Vote', 'Wish', 'TC', 'Status', 'BlockRequest', 'BlockResponse'];
 const KIND_VAR = { Proposal: '--k-proposal', Vote: '--k-vote', Wish: '--k-wish', TC: '--k-tc', Status: '--k-status', BlockRequest: '--k-sync', BlockResponse: '--k-sync' };
-const ROW_H = 16, TOP = 8, LEFT = 44;
+const ROW_H = 16, TOP = 8, LEFT = 44, PAN_MARGIN = 80;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const md = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
@@ -122,7 +163,12 @@ const nodeColor = h => `var(--n${h % 7})`;
 const kindColor = k => `var(${KIND_VAR[k] || '--k-other'})`;
 const NS = 'http://www.w3.org/2000/svg';
 
-let D = null, cur = 0, timer = null;
+let D = null, cur = 0, timer = null, zoom = 1, treeZoom = 1;
+let timeAxis = false, chainOn = true, selectedBlock = null, searchIds = null, searchSteps = [];
+let chainOpen = new Set(), chainOpenFor = -1, highlightOn = true, labelsOn = true;
+const focusNodes = new Set();
+const rowH = () => ROW_H * zoom;
+const panPadding = box => `${Math.max(0, box.clientHeight - PAN_MARGIN)}px ${Math.max(0, box.clientWidth - PAN_MARGIN)}px`;
 const hidden = new Set(['self']);
 try { for (const k of JSON.parse(localStorage.getItem('hs-viewer-hidden') || '[]')) hidden.add(k); } catch (e) {}
 
@@ -144,15 +190,27 @@ function load(data) {
   }
   D.qcAt = {};
   for (const q of D.qcs) (D.qcAt[q.step] = D.qcAt[q.step] || []).push(q);
+  D.marksAt = {};
+  for (const m of D.marks || []) (D.marksAt[m.step] = D.marksAt[m.step] || []).push(m);
   D.blockBy = Object.fromEntries(D.blocks.map(b => [b.hash, b]));
   const f = D.meta.faulty || [];
   D.faulty = f;
   $('meta').textContent = `${D.meta.model} · ${D.meta.source} · ${D.meta.steps} steps · running ${D.meta.running.join(',')}` + (f.length ? ` · ${D.meta.faulty_label || 'faulty'} ${f.join(',')}` : '');
   $('slider').max = $('stepnum').max = D.steps.length - 1;
+  D.hasTime = D.steps.every(s => s.time !== undefined && !Number.isNaN(+s.time));
+  $('timeLabel').style.display = D.hasTime ? '' : 'none';
+  if (!D.hasTime) timeAxis = false;
+  selectedBlock = null;
+  focusNodes.clear();
+  $('search').value = '';
+  setSearch('');
+  const sync = D.meta.sync;
+  $('synccost').textContent = sync && sync.responses ? `blocksync: ${sync.responses} responses, ${sync.blocks} blocks, ${sync.redundant} already stored` : '';
   legend();
   chart();
-  const m = /step=(\d+)/.exec(location.hash);
-  go(m ? +m[1] : 0, true);
+  progress();
+  const m = /step=(\d+)/.exec(location.hash), bad = (D.marks || []).find(x => x.violation);
+  go(m ? +m[1] : bad ? bad.step : 0, true);
 }
 
 function legend() {
@@ -176,31 +234,62 @@ function laneX(h, w) {
   const step = (w - LEFT - 16) / Math.max(1, hosts.length - 1 || 1);
   return hosts.length === 1 ? LEFT + (w - LEFT) / 2 : LEFT + hosts.indexOf(h) * step;
 }
-const rowY = i => TOP + i * ROW_H + ROW_H / 2;
+const rowY = i => D.rowYs[i];
+
+function layoutRows() {
+  const n = D.steps.length;
+  const times = timeAxis ? D.steps.map(s => +s.time) : null;
+  const span = times ? times[n - 1] - times[0] : 0;
+  D.rowGap = times && span > 0 ? rowH() / 4 : rowH();
+  D.rowK = times && span > 0 ? n * (rowH() - D.rowGap) / span : 0;
+  D.rowTops = new Array(n + 1);
+  D.rowYs = new Array(n);
+  let y = TOP;
+  for (let i = 0; i < n; i++) {
+    D.rowTops[i] = y;
+    D.rowYs[i] = y + D.rowGap / 2;
+    y += D.rowGap + (times && i + 1 < n ? (times[i + 1] - times[i]) * D.rowK : 0);
+  }
+  D.rowTops[n] = y;
+}
 
 function chart() {
-  const svg = $('chart'), lanes = $('lanes');
-  const w = Math.max(260, $('diagram').clientWidth - 2);
-  const h = TOP * 2 + D.steps.length * ROW_H;
+  const box = $('diagram'), svg = $('chart'), lanes = $('lanes');
+  const before = svg.getBoundingClientRect();
+  $('pan-area').style.padding = panPadding(box);
+  layoutRows();
+  const w = Math.max(260, (box.clientWidth - 2) * zoom);
+  const h = D.rowTops[D.steps.length] + TOP;
+  const showLabels = zoom >= 0.5;
   svg.innerHTML = ''; lanes.innerHTML = '';
   svg.setAttribute('width', w); svg.setAttribute('height', h);
   lanes.setAttribute('width', w);
+  D.laneEls = new Map();
+  D.stepEls = [];
   for (const host of D.meta.hosts) {
     const x = laneX(host, w);
     const faulty = D.faulty.includes(host);
-    el('text', { x, y: 16, 'text-anchor': 'middle', 'font-size': 12, 'font-weight': 600, style: `fill:${nodeColor(host)}` }, lanes, `n${host}${faulty ? ` (${D.meta.faulty_label || 'faulty'})` : ''}`);
+    const name = el('text', { x, y: 16, class: 'lane-name', 'text-anchor': 'middle', 'font-size': 12, 'font-weight': 600, style: `fill:${nodeColor(host)}` }, lanes, `n${host}${faulty ? ` (${D.meta.faulty_label || 'faulty'})` : ''}`);
+    name.onclick = () => toggleNode(host);
+    D.laneEls.set(host, [name]);
   }
   const bg = el('g', {}, svg);
-  D.curRow = el('rect', { x: 0, width: w, height: ROW_H, style: `fill:var(--cur)` }, bg);
+  D.curRow = el('rect', { x: 0, width: w, height: D.rowGap, style: `fill:var(--cur)` }, bg);
   for (const host of D.meta.hosts) {
     const x = laneX(host, w);
     el('line', { x1: x, x2: x, y1: 0, y2: h, style: 'stroke:var(--line)', 'stroke-dasharray': D.faulty.includes(host) ? '3 3' : '' }, bg);
+    const bands = el('g', {}, bg);
+    viewBands(host, x, bands);
+    D.laneEls.get(host).push(bands);
   }
   const rows = el('g', {}, svg);
+  let lastLabel = -Infinity;
   D.steps.forEach((s, i) => {
-    const r = el('rect', { class: 'row-hit', x: 0, y: TOP + i * ROW_H, width: w, height: ROW_H }, rows);
-    r.onclick = () => go(i);
-    if (i % 10 === 0) el('text', { x: 4, y: rowY(i) + 4, 'font-size': 10, style: 'fill:var(--muted)' }, rows, s.time !== undefined ? 't' + s.time : i);
+    el('rect', { class: 'row-hit', x: 0, y: D.rowTops[i], width: w, height: D.rowTops[i + 1] - D.rowTops[i] }, rows);
+    if (rowY(i) - lastLabel >= 150) {
+      el('text', { x: 4, y: rowY(i) + 4, 'font-size': 10, style: 'fill:var(--muted)' }, rows, s.time !== undefined ? 't' + s.time : i);
+      lastLabel = rowY(i);
+    }
   });
   const arrows = el('g', {}, svg);
   D.arrowEls = [];
@@ -213,61 +302,378 @@ function chart() {
     if (m.dropped) attrs.opacity = .25;
     if (m.channel === 'sync') attrs['stroke-dasharray'] = '6 2';
     const line = el('line', attrs, arrows);
-    if (m.recv !== null) el('circle', { cx: x2, cy: y2, r: 2, style: `fill:${kindColor(m.kind)}`, opacity: .8 }, arrows);
+    const dot = m.recv !== null ? el('circle', { cx: x2, cy: y2, r: 2, style: `fill:${kindColor(m.kind)}`, opacity: .8 }, arrows) : null;
     const hit = el('line', { x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': 7 }, arrows);
     hit.onmousemove = e => tip(e, `<b>${esc(m.kind)}</b> n${m.from} → n${m.to} · sent ${m.send} · ${m.dropped ? 'dropped by the network' : m.recv === null ? 'in flight at end' : 'received ' + m.recv}<br><code>${esc(m.text)}</code>`);
     hit.onmouseleave = untip;
-    hit.onclick = () => go(m.recv === null ? m.send : m.recv);
-    D.arrowEls.push({ m, line });
+    hit.onclick = () => pick(m.recv === null ? m.send : m.recv);
+    D.arrowEls.push({ m, line, dot });
+  }
+  const laneHits = el('g', {}, svg);
+  for (const host of D.meta.hosts) {
+    const hit = el('rect', { class: 'lane-hit', x: laneX(host, w) - 8, y: 0, width: 16, height: h }, laneHits);
+    hit.onclick = () => toggleNode(host);
   }
   const marks = el('g', {}, svg);
+  const size = Math.max(0.5, Math.min(1, zoom));
   D.steps.forEach((s, i) => {
     if (i === 0 || s.actor === null || s.actor === undefined) return;
     const x = laneX(s.actor, w), y = rowY(i);
     const t = s.tags;
     let shape;
-    if (t.includes('commit')) shape = el('rect', { x: x - 5, y: y - 5, width: 10, height: 10, transform: `rotate(45 ${x} ${y})`, style: `fill:${nodeColor(s.actor)}` }, marks);
-    else if (t.includes('timer')) shape = el('rect', { x: x - 4, y: y - 4, width: 8, height: 8, style: `fill:var(--panel);stroke:${nodeColor(s.actor)}`, 'stroke-width': 1.5 }, marks);
-    else shape = el('circle', { cx: x, cy: y, r: t.includes('drop') ? 2.5 : 4, style: `fill:${t.includes('drop') ? 'var(--muted)' : nodeColor(s.actor)}` }, marks);
+    const half = (t.includes('commit') ? 7 : 6) * size;
+    if (t.includes('commit')) shape = el('rect', { x: x - half, y: y - half, width: 2 * half, height: 2 * half, transform: `rotate(45 ${x} ${y})`, style: `fill:${nodeColor(s.actor)}` }, marks);
+    else if (t.includes('timer')) shape = el('rect', { x: x - half, y: y - half, width: 2 * half, height: 2 * half, style: `fill:var(--panel);stroke:${nodeColor(s.actor)}`, 'stroke-width': 2 }, marks);
+    else shape = el('circle', { cx: x, cy: y, r: t.includes('drop') ? 3.5 * size : half, style: `fill:${t.includes('drop') ? 'var(--muted)' : nodeColor(s.actor)}` }, marks);
     shape.style.cursor = 'pointer';
-    shape.onclick = () => go(i);
+    shape.onclick = () => pick(i);
     shape.onmousemove = e => tip(e, `<b>${i}</b>${s.time !== undefined ? ' t=' + esc(s.time) : ''} ${esc(s.action)} ${s.tags.map(x => `<span class="tag">${x}</span>`).join('')}<br>${md(s.label)}`);
     shape.onmouseleave = untip;
-    const prev = D.steps[i - 1].nodes[s.actor], now = s.nodes[s.actor];
-    if (prev && now && prev.view !== now.view) el('text', { x: x + 7, y: y + 4, 'font-size': 10, style: 'fill:var(--muted)' }, marks, `v${now.view}`);
-    if (D.qcAt[i]) el('text', { x: w - 4, y: y + 4, 'font-size': 10, 'text-anchor': 'end', style: 'fill:var(--accent)' }, marks, D.qcAt[i].map(q => `QC b${q.block}@v${q.view}`).join(' '));
+    const prev = D.steps[i - 1].nodes[s.actor], now = s.nodes[s.actor], els = [shape];
+    const entered = prev && now && prev.view !== now.view;
+    if (labelsOn && D.rowGap >= 12) {
+      const last = s.actor === D.meta.hosts[D.meta.hosts.length - 1];
+      els.push(el('text', { x: x + (last ? -11 : 11), y: y + 4, class: 'step-label', 'text-anchor': last ? 'end' : 'start' }, marks, fullCaption(i)));
+    } else if (showLabels && entered) els.push(el('text', { x: x + 11, y: y + 4, 'font-size': 10, style: 'fill:var(--muted)' }, marks, `v${now.view}`));
+    if (showLabels && D.qcAt[i]) els.push(el('text', { x: w - 4, y: y + 4, 'font-size': 10, 'text-anchor': 'end', style: 'fill:var(--accent)' }, marks, D.qcAt[i].map(q => `QC b${q.block}@v${q.view}`).join(' ')));
+    D.stepEls.push({ step: i, actor: s.actor, els });
   });
+  const overlay = el('g', { 'pointer-events': 'none' }, svg);
+  const hosts = D.meta.hosts, spacing = (w - LEFT - 16) / Math.max(1, hosts.length - 1);
+  for (const [step, group] of Object.entries(D.marksAt)) {
+    const bad = group.some(m => m.violation), color = bad ? 'var(--bad)' : 'var(--mark)';
+    const y = markY(+step, group[0]), text = group.map(m => `${m.label.length > 80 ? m.label.slice(0, 80) + '…' : m.label} · t${m.time}`).join(', ');
+    el('line', { x1: 0, x2: w, y1: y, y2: y, style: `stroke:${color}`, 'stroke-width': bad ? 3 : 2 }, overlay);
+    for (const host of spacing > text.length * 7 + 16 ? hosts : hosts.slice(0, 1)) {
+      const last = host === hosts[hosts.length - 1] && hosts.length > 1;
+      el('text', { x: laneX(host, w) + (last ? -6 : 6), y: y - 4, class: `mark-label${bad ? ' violation' : ''}`, 'text-anchor': last ? 'end' : 'start' }, overlay, text);
+    }
+  }
+  const after = svg.getBoundingClientRect();
+  box.scrollLeft += after.left - before.left;
+  box.scrollTop += after.top - before.top;
+}
+
+function stepCaption(i) {
+  const s = D.steps[i], m = D.byStep[i].recv[0];
+  if (m) {
+    const parts = /^(\w+)\((v\d+)(?:,\s*(b\d+))?/.exec(m.text);
+    return `← n${m.from} ${parts ? parts.slice(1).filter(Boolean).join(' ') : m.kind}`;
+  }
+  const view = (/\((\d+)\)/.exec(s.label) || [])[1];
+  if (s.action === 'view_timeout') return `view timer v${view}`;
+  if (s.action === 'lock_timeout') return `lock timer v${view}`;
+  const label = s.label.replace(/\*\*/g, '').split(' (')[0];
+  return label.length > 40 ? label.slice(0, 40) + '…' : label;
+}
+
+function fullCaption(i) {
+  const s = D.steps[i], prev = i > 0 ? D.steps[i - 1].nodes[s.actor] : null, now = s.nodes[s.actor];
+  const entered = prev && now && prev.view !== now.view;
+  return stepCaption(i) + (entered ? ` → v${now.view}` : '') + (s.tags.includes('commit') ? ' · commit' : '');
+}
+
+function markY(step, mark) {
+  const end = D.rowTops[step + 1];
+  return D.rowK ? Math.min(end, rowY(step) + (+mark.time - +D.steps[step].time) * D.rowK) : end;
+}
+
+function viewBands(host, x, parent) {
+  const n = D.steps.length, epoch = D.meta.epoch_length;
+  let start = 0, view = null;
+  const flush = end => {
+    if (view === null) return;
+    el('rect', { x: x - 4, y: D.rowTops[start], width: 8, height: D.rowTops[end] - D.rowTops[start], style: `fill:${nodeColor(host)}`, opacity: view % 2 ? .3 : .12 }, parent);
+    if (epoch && view % epoch === 0) el('line', { x1: x - 8, x2: x + 8, y1: D.rowTops[start], y2: D.rowTops[start], style: `stroke:${nodeColor(host)}`, 'stroke-width': 2 }, parent);
+  };
+  for (let i = 0; i < n; i++) {
+    const node = D.steps[i].nodes[host], v = node ? node.view : null;
+    if (v !== view) { flush(i); start = i; view = v; }
+  }
+  flush(n);
+}
+
+function chainOf(step) {
+  const hops = [];
+  let i = step;
+  for (;;) {
+    const m = D.byStep[i].recv[0];
+    if (!m || m.send >= i) break;
+    hops.push(m);
+    i = m.send;
+  }
+  return { hops, root: i };
+}
+
+function focusIds() {
+  if (searchIds) return searchIds;
+  if (selectedBlock === null) return null;
+  const ids = new Set(D.messages.filter(m => m.block === selectedBlock).map(m => m.id));
+  return ids.size ? ids : null;
 }
 
 function highlight() {
   if (!D.curRow) return;
-  D.curRow.setAttribute('y', TOP + cur * ROW_H);
-  for (const { m, line } of D.arrowEls) {
-    const on = m.send === cur || m.recv === cur;
-    line.setAttribute('opacity', on ? 1 : .35);
-    line.setAttribute('stroke-width', on ? 2.4 : 1.2);
+  D.curRow.setAttribute('y', D.rowTops[cur]);
+  for (const { line, x } of D.progressCursors || []) { line.setAttribute('x1', x(cur)); line.setAttribute('x2', x(cur)); }
+  const byNode = focusNodes.size > 0, focus = byNode ? null : focusIds();
+  const chain = highlightOn && !byNode && !focus && chainOn ? new Set(chainOf(cur).hops.map(m => m.id)) : null;
+  const picked = focus || (chain && chain.size ? chain : null);
+  for (const { m, line, dot } of D.arrowEls) {
+    const related = !byNode || focusNodes.has(m.from) || focusNodes.has(m.to);
+    const on = highlightOn && related && (m.send === cur || m.recv === cur);
+    const hit = byNode ? related : picked && picked.has(m.id);
+    line.setAttribute('opacity', on ? 1 : hit ? .95 : byNode || picked ? .08 : .35);
+    line.setAttribute('stroke-width', on ? 2.4 : hit ? 1.8 : 1.2);
+    if (dot) dot.setAttribute('opacity', related ? .8 : .1);
   }
+  const found = !byNode && searchIds ? new Set(searchSteps) : null;
+  for (const { step, actor, els } of D.stepEls) {
+    const visible = found ? found.has(step) : !byNode || focusNodes.has(actor);
+    for (const e of els) e.setAttribute('opacity', visible ? 1 : .15);
+  }
+  for (const [host, els] of D.laneEls) for (const e of els) e.setAttribute('opacity', !byNode || focusNodes.has(host) ? 1 : .3);
+}
+
+function toggleNode(host) {
+  if (!focusNodes.delete(host)) focusNodes.add(host);
+  highlightOn = true;
+  untip();
+  highlight();
+}
+
+function progress() {
+  const box = $('progress');
+  box.innerHTML = '';
+  D.progressCursors = [];
+  const n = D.steps.length, xs = D.steps.map((s, i) => D.hasTime ? +s.time : i);
+  const x0 = xs[0], x1 = Math.max(xs[n - 1], x0 + 1);
+  const W = Math.max(120, (box.clientWidth - 10) / 2), H = 110, L = 28, R = 4, T = 16, B = 4;
+  const sx = v => L + (v - x0) / (x1 - x0) * (W - L - R);
+  for (const [title, get] of [['view', s => s.view], ['committed height', s => s.exec_height]]) {
+    const max = Math.max(1, ...D.steps.flatMap(s => Object.values(s.nodes).map(get)));
+    const sy = v => H - B - v / max * (H - T - B);
+    const svg = el('svg', { width: W, height: H }, box);
+    el('text', { x: L, y: 11, 'font-size': 10, style: 'fill:var(--muted)' }, svg, title);
+    el('text', { x: 2, y: T + 8, 'font-size': 9, style: 'fill:var(--muted)' }, svg, max);
+    el('text', { x: 2, y: H - B, 'font-size': 9, style: 'fill:var(--muted)' }, svg, 0);
+    el('line', { x1: L, x2: W - R, y1: H - B, y2: H - B, style: 'stroke:var(--line)' }, svg);
+    for (const m of D.marks || []) el('line', { x1: sx(xs[m.step]), x2: sx(xs[m.step]), y1: T, y2: H - B, style: `stroke:${m.violation ? 'var(--bad)' : 'var(--mark)'}` }, svg);
+    for (const host of D.meta.hosts) {
+      const points = [];
+      let last = null;
+      D.steps.forEach((s, i) => {
+        const node = s.nodes[host];
+        if (!node) return;
+        const v = get(node);
+        if (last !== null && v !== last) points.push(`${sx(xs[i])},${sy(last)}`);
+        if (v !== last) points.push(`${sx(xs[i])},${sy(v)}`);
+        last = v;
+      });
+      if (last !== null) points.push(`${sx(xs[n - 1])},${sy(last)}`);
+      el('polyline', { points: points.join(' '), fill: 'none', style: `stroke:${nodeColor(host)}`, 'stroke-width': 1.5, 'stroke-dasharray': D.faulty.includes(host) ? '3 3' : '' }, svg);
+    }
+    const line = el('line', { y1: T, y2: H - B, style: 'stroke:var(--fg)' }, svg);
+    D.progressCursors.push({ line, x: i => sx(xs[i]) });
+    svg.onclick = e => {
+      const at = x0 + (e.clientX - svg.getBoundingClientRect().left - L) / (W - L - R) * (x1 - x0), i = xs.findIndex(v => v >= at);
+      go(i < 0 ? n - 1 : i, true);
+    };
+  }
+}
+
+function setSearch(term) {
+  const text = term.trim();
+  if (!text || !D) {
+    searchIds = null; searchSteps = []; $('searchinfo').textContent = '';
+  } else {
+    const source = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`${/^\w/.test(text) ? '(?<!\\w)' : ''}${source}${/\w$/.test(text) ? '(?!\\w)' : ''}`, 'i');
+    const hits = D.messages.filter(m => re.test(m.text));
+    const steps = new Set(hits.map(m => m.recv === null ? m.send : m.recv));
+    searchIds = new Set(hits.map(m => m.id));
+    D.steps.forEach((s, i) => {
+      if (!re.test(s.label) && !re.test(fullCaption(i))) return;
+      steps.add(i);
+      if (D.byStep[i].recv[0]) searchIds.add(D.byStep[i].recv[0].id);
+    });
+    searchSteps = [...steps].sort((a, b) => a - b);
+    $('searchinfo').textContent = `${searchIds.size} messages · ${searchSteps.length} steps`;
+  }
+  if (D && D.curRow) highlight();
+}
+
+function searchJump(dir) {
+  if (!searchSteps.length) return;
+  const later = searchSteps.find(i => i > cur), earlier = [...searchSteps].reverse().find(i => i < cur);
+  go(dir > 0 ? later ?? searchSteps[0] : earlier ?? searchSteps[searchSteps.length - 1], true);
+}
+
+function clearHighlight() {
+  highlightOn = false;
+  focusNodes.clear();
+  selectedBlock = null;
+  $('search').value = '';
+  setSearch('');
+  if (!D) return;
+  tree();
+  blockCard();
+  highlight();
 }
 
 function go(i, scroll) {
   if (!D) return;
-  cur = Math.max(0, Math.min(D.steps.length - 1, i));
+  const next = Math.max(0, Math.min(D.steps.length - 1, i));
+  if (next !== cur) highlightOn = true;
+  cur = next;
   $('slider').value = $('stepnum').value = cur;
   try { history.replaceState(null, '', `#step=${cur}`); } catch (e) {}
   highlight();
   detail();
-  const box = $('diagram'), y = TOP + cur * ROW_H;
-  if (scroll || y < box.scrollTop + 30 || y > box.scrollTop + box.clientHeight - 40) box.scrollTop = y - box.clientHeight / 2;
+  const box = $('diagram'), plot = $('chart').getBoundingClientRect();
+  const top = plot.top - box.getBoundingClientRect().top, y = top + rowY(cur);
+  if (scroll || y < 30 || y > box.clientHeight - 40) {
+    box.scrollTop += Math.max(top - 24, Math.min(top + plot.height - box.clientHeight, y - box.clientHeight / 2));
+  }
+}
+
+function copyCaption(button) {
+  const caption = $('caption');
+  const done = () => {
+    button.textContent = 'copied';
+    setTimeout(() => { button.textContent = 'copy'; }, 1000);
+  };
+  const fallback = () => {
+    const range = document.createRange(), selection = getSelection();
+    range.selectNodeContents(caption);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.execCommand('copy');
+    selection.removeAllRanges();
+    done();
+  };
+  if (navigator.clipboard) navigator.clipboard.writeText(caption.textContent).then(done, fallback);
+  else fallback();
+}
+
+function pick(i) {
+  highlightOn = true;
+  go(i);
+  $('pointcard').scrollIntoView({ block: 'nearest' });
 }
 
 function detail() {
   const s = D.steps[cur];
   $('steptitle').textContent = `Step ${cur} / ${D.steps.length - 1}` + (s.time !== undefined ? ` · t = ${s.time}` : '');
   const qcs = (D.qcAt[cur] || []).filter(() => cur > 0).map(q => `<div>new QC b${q.block}@v${q.view} ${esc(q.signers)}</div>`).join('');
-  $('action').innerHTML = `<div><code>${esc(s.action)}</code>${s.actor !== null && s.actor !== undefined ? ` · n${s.actor}` : ''} ${s.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div><div style="margin-top:4px">${md(s.label)}</div>${qcs}`;
+  const marks = (D.marksAt[cur] || []).map(m => `<div class="mark-note${m.violation ? ' violation' : ''}">── ${esc(m.label)} · t = ${esc(m.time)} ──</div>`).join('');
+  $('action').innerHTML = `<div><code>${esc(s.action)}</code>${s.actor !== null && s.actor !== undefined ? ` · n${s.actor}` : ''} ${s.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div><div style="margin-top:4px">${md(s.label)}</div><div class="caption-row"><code id="caption">${esc(fullCaption(cur))}</code><button id="copyCaption" title="Copy the caption of this point">copy</button></div>${qcs}${marks}`;
   tree();
+  blockCard();
+  pointCard();
+  chainCard();
   msgs();
   table();
+}
+
+function stepLink(i) {
+  return `<span class="link" data-step="${i}">${D.hasTime ? 't' + esc(D.steps[i].time) : '@' + i}</span>`;
+}
+
+const delayOf = m => D.hasTime ? +D.steps[m.recv].time - +D.steps[m.send].time : m.recv - m.send;
+const EVENT_NOTES = {
+  init: 'the state before the first event',
+  start: 'the node starts running',
+  view_timeout: 'the timer of this view expired',
+  lock_timeout: 'the leader stopped waiting for a fresher QC',
+  synced: 'blocksync delivered the blocks',
+};
+const clip = v => { const text = String(v); return text.length > 90 ? text.slice(0, 90) + '…' : text; };
+
+function stateChanges(s, prev) {
+  const changes = [];
+  if (!prev) return changes;
+  for (const k of Object.keys(s.nodes)) {
+    const was = prev.nodes[k], now = s.nodes[k];
+    if (!was) continue;
+    const prefix = +k === s.actor ? '' : `n${k} `;
+    for (const [name, get] of ROWS) {
+      if (name === 'committed' || name === 'stored') {
+        const added = now[name].filter(h => !was[name].includes(h));
+        if (added.length) changes.push(`${prefix}${name} <code>+${added.map(h => 'b' + h).join(', ')}</code>`);
+        continue;
+      }
+      const before = get(was, k, prev), after = get(now, k, s);
+      if (String(before) !== String(after)) changes.push(`${prefix}${name} <code>${esc(clip(before))}</code> → <code>${esc(clip(after))}</code>`);
+    }
+  }
+  return changes;
+}
+
+function stepEffects(i) {
+  const s = D.steps[i], groups = new Map();
+  for (const m of D.byStep[i].sent) groups.set(m.text, [...(groups.get(m.text) || []), m]);
+  const arrival = m => `n${m.to} ${m.dropped ? 'dropped' : m.recv === null ? 'in flight' : stepLink(m.recv)}`;
+  const effects = [...groups].map(([text, group]) => `sent <code>${esc(text)}</code> → ${group.map(arrival).join(', ')}`);
+  if (i > 0) for (const q of D.qcAt[i] || []) effects.push(`new QC <code>b${q.block}@v${q.view}</code>`);
+  if (s.tags.includes('sync') && s.action !== 'synced') effects.push('requested blocksync');
+  if (s.tags.includes('faulty')) effects.push('byzantine behaviour is active on this node');
+  return effects;
+}
+
+function pointHtml(i, openLink) {
+  const s = D.steps[i], prev = i > 0 ? D.steps[i - 1] : null, m = D.byStep[i].recv[0], note = EVENT_NOTES[s.action];
+  const rows = [['node', `${s.actor !== null && s.actor !== undefined ? `n${s.actor}` : '—'} · step ${i}${s.time !== undefined ? ` · t = ${esc(s.time)}` : ''}${openLink ? ` · <span class="link" data-step="${i}">open</span>` : ''}`]];
+  rows.push(['event', m
+    ? `received <code>${esc(m.text)}</code> from n${m.from}, sent ${stepLink(m.send)}, took ${delayOf(m)}`
+    : `${md(s.label)}${note ? ` <span class="empty">· ${note}</span>` : ''}`]);
+  const effects = stepEffects(i), changes = stateChanges(s, prev);
+  if (effects.length) rows.push(['effects', effects.join('<br>')]);
+  if (changes.length) rows.push(['state', changes.join('<br>')]);
+  if (!effects.length && !changes.length && prev) rows.push(['result', 'no visible effect: nothing sent, no state change']);
+  for (const mark of D.marksAt[i] || []) rows.push([mark.violation ? 'violation' : 'mark', `${esc(mark.label)} · t = ${esc(mark.time)}`]);
+  return rows.map(([k, html]) => `<div class="k">${k}</div><div>${html}</div>`).join('');
+}
+
+function pointCard() {
+  $('point').innerHTML = pointHtml(cur);
+}
+
+function chainOrigin(s) {
+  const who = s.actor !== null && s.actor !== undefined ? `n${s.actor}: ` : '';
+  const view = (/\((\d+)\)/.exec(s.label) || [])[1];
+  const text = {
+    init: 'initial state',
+    start: 'node started',
+    view_timeout: `view timer of v${view} expired`,
+    lock_timeout: `lock timer of v${view} expired`,
+    synced: 'blocksync delivered blocks',
+  }[s.action];
+  return who + (text || esc(s.action));
+}
+
+function chainCard() {
+  $('chaincard').style.display = chainOn ? '' : 'none';
+  if (!chainOn) return;
+  if (chainOpenFor !== cur) { chainOpen = new Set(); chainOpenFor = cur; }
+  const { hops, root } = chainOf(cur);
+  const r = D.steps[root];
+  const row = (step, html) => `<div class="hop" data-hop="${step}">${chainOpen.has(step) ? '▾' : '▸'} ${html}</div>${chainOpen.has(step) ? `<div class="kv hop-detail">${pointHtml(step, true)}</div>` : ''}`;
+  const rows = [row(root, `<b>${chainOrigin(r)}</b> ${stepLink(root)}`)];
+  if (hops.length > 12) rows.push(`<div class="empty">… ${hops.length - 12} more hops</div>`);
+  for (const m of hops.slice(0, 12).reverse()) rows.push(row(m.recv, `<span class="sw" style="background:${kindColor(m.kind)}"></span> n${m.from} → n${m.to} <code>${esc(m.text)}</code> <span class="empty">+${delayOf(m)}</span> ${stepLink(m.recv)}`));
+  $('chain').innerHTML = rows.join('');
+}
+
+function blockCard() {
+  const box = $('blockinfo'), b = selectedBlock === null ? null : D.blockBy[selectedBlock];
+  if (!b) { box.innerHTML = ''; return; }
+  const qc = D.qcs.find(q => q.block === b.hash);
+  const commits = D.meta.hosts.map(h => {
+    const i = D.steps.findIndex(s => s.nodes[h] && (s.nodes[h].committed.includes(b.hash) || s.nodes[h].exec_hash === b.hash));
+    return `n${h} ${i < 0 ? '—' : stepLink(i)}`;
+  }).join(' · ');
+  box.innerHTML = `<div><b>b${b.hash}</b> proposed ${stepLink(b.minted)}${b.proposer !== null && b.proposer !== undefined ? ` by n${b.proposer}` : ''} · QC ${qc ? stepLink(qc.step) : '—'}</div><div>committed: ${commits}</div><div class="empty">click the block again to clear</div>`;
 }
 
 function msgs() {
@@ -297,7 +703,8 @@ function tree() {
   const maxH = Math.max(0, ...blocks.map(b => b.height));
   const svg = document.createElementNS(NS, 'svg');
   const W = 20 + (maxH + 1) * GX, H = 20 + (next + 1) * GY;
-  svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.setAttribute('width', W * treeZoom); svg.setAttribute('height', H * treeZoom);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const pos = b => ({ x: 10 + b.height * GX, y: 10 + lane[b.hash] * GY });
   for (const b of blocks) {
     const p = D.blockBy[b.parent];
@@ -315,7 +722,8 @@ function tree() {
     const all = running.every(k => s.nodes[k].committed.includes(b.hash) || s.nodes[k].exec_hash === b.hash);
     const cert = certified.has(b.hash);
     const g = el('g', {}, svg);
-    el('rect', { x, y, width: BW, height: BH, rx: 5, style: `fill:${all ? 'var(--row)' : 'var(--panel)'};stroke:${cert ? 'var(--fg)' : 'var(--muted)'}`, 'stroke-width': cert ? 2 : 1, 'stroke-dasharray': cert ? '' : '4 3' }, g);
+    const picked = selectedBlock === b.hash;
+    el('rect', { x, y, width: BW, height: BH, rx: 5, style: `fill:${all ? 'var(--row)' : 'var(--panel)'};stroke:${picked ? 'var(--mark)' : cert ? 'var(--fg)' : 'var(--muted)'}`, 'stroke-width': picked ? 3 : cert ? 2 : 1, 'stroke-dasharray': cert || picked ? '' : '4 3' }, g);
     const n = D.meta.committee_size, spec = !('view' in b);
     const view = spec ? Math.floor(b.hash / 2 / n) : b.view, prop = spec ? Math.floor(b.hash / 2) % n : b.proposer;
     el('text', { x: x + 6, y: y + 13, 'font-size': 11, 'font-weight': 600, class: 'mono' }, g, `b${b.hash}${spec && b.hash % 2 ? "'" : ''}`);
@@ -330,9 +738,21 @@ function tree() {
     }
     g.onmousemove = e => tip(e, `<code>b${b.hash}</code> height ${b.height}, parent b${b.parent}, minted @${b.minted}<br>justify QC(b${b.justify.block}@v${b.justify.view} ${esc(b.justify.signers)})${cert ? '' : '<br>no QC yet'}`);
     g.onmouseleave = untip;
+    g.style.cursor = 'pointer';
+    g.onclick = () => {
+      selectedBlock = picked ? null : b.hash;
+      tree();
+      blockCard();
+      highlight();
+    };
   }
-  $('tree').innerHTML = '';
-  $('tree').appendChild(svg);
+  const box = $('tree'), area = $('tree-area');
+  const was = (area.firstElementChild || box).getBoundingClientRect();
+  area.style.padding = panPadding(box);
+  area.replaceChildren(svg);
+  const now = svg.getBoundingClientRect();
+  box.scrollLeft += now.left - was.left;
+  box.scrollTop += now.top - was.top;
 }
 
 const qcs = q => `b${q.block}@v${q.view} ${q.signers}`;
@@ -400,6 +820,37 @@ $('next').onclick = () => go(cur + 1);
 $('tprev').onclick = () => jump(-1);
 $('tnext').onclick = () => jump(1);
 $('play').onclick = play;
+$('clearHighlight').onclick = e => { clearHighlight(); e.target.blur(); };
+$('detail').addEventListener('click', e => {
+  if (e.target.id === 'copyCaption') { copyCaption(e.target); return; }
+  const target = e.target.closest('[data-step]');
+  if (target) { go(+target.dataset.step, true); return; }
+  const hop = e.target.closest('[data-hop]');
+  if (!hop) return;
+  const step = +hop.dataset.hop;
+  chainOpen.has(step) ? chainOpen.delete(step) : chainOpen.add(step);
+  chainCard();
+});
+$('search').oninput = e => setSearch(e.target.value);
+$('search').onkeydown = e => {
+  if (e.key === 'Enter') { searchJump(e.shiftKey ? -1 : 1); e.preventDefault(); }
+  else if (e.key === 'Escape') { e.target.value = ''; setSearch(''); e.target.blur(); }
+};
+$('chainToggle').onchange = e => {
+  chainOn = e.target.checked;
+  e.target.blur();
+  if (D) { highlight(); chainCard(); }
+};
+$('labelsToggle').onchange = e => {
+  labelsOn = e.target.checked;
+  e.target.blur();
+  if (D) { chart(); highlight(); }
+};
+$('timeToggle').onchange = e => {
+  timeAxis = e.target.checked;
+  e.target.blur();
+  if (D) { chart(); go(cur, true); }
+};
 $('theme').onclick = () => {
   const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   document.documentElement.dataset.theme = dark ? 'light' : 'dark';
@@ -411,9 +862,83 @@ addEventListener('keydown', e => {
   else if (e.key === ' ') { play(); e.preventDefault(); }
   else if (e.key === 'Home') go(0);
   else if (e.key === 'End') go(D.steps.length - 1);
+  else if (e.key === 'Escape') clearHighlight();
+});
+const mainEl = document.querySelector('main'), splitter = $('splitter');
+function resizeDiagram(width) {
+  const clamped = Math.max(280, Math.min(width, mainEl.clientWidth - 320));
+  mainEl.style.setProperty('--diagram-width', `${clamped}px`);
+}
+try { const saved = +localStorage.getItem('hs-viewer-diagram-width'); if (saved) resizeDiagram(saved); } catch (e) {}
+splitter.onpointerdown = e => { splitter.setPointerCapture(e.pointerId); splitter.classList.add('dragging'); e.preventDefault(); };
+splitter.onpointermove = e => { if (splitter.hasPointerCapture(e.pointerId)) resizeDiagram(e.clientX - mainEl.getBoundingClientRect().left); };
+splitter.onpointerup = () => {
+  splitter.classList.remove('dragging');
+  try { localStorage.setItem('hs-viewer-diagram-width', $('diagram').offsetWidth); } catch (e) {}
+  if (D) { chart(); progress(); highlight(); tree(); }
+};
+function zoomable(box, content, apply) {
+  box.addEventListener('wheel', e => {
+    if (!e.ctrlKey || !D) return;
+    e.preventDefault();
+    const before = content().getBoundingClientRect();
+    const fx = (e.clientX - before.left) / before.width, fy = (e.clientY - before.top) / before.height;
+    untip();
+    apply(Math.exp(-e.deltaY * (e.deltaMode === 1 ? 33 : 1) * 0.002));
+    const after = content().getBoundingClientRect();
+    box.scrollLeft += after.left + fx * after.width - e.clientX;
+    box.scrollTop += after.top + fy * after.height - e.clientY;
+  }, { passive: false });
+}
+function pannable(box) {
+  let pan = null, panned = false;
+  box.addEventListener('pointerdown', e => {
+    const r = box.getBoundingClientRect();
+    panned = false;
+    if (e.button !== 0 || e.clientX - r.left >= box.clientWidth || e.clientY - r.top >= box.clientHeight) return;
+    pan = { x: e.clientX, y: e.clientY, left: box.scrollLeft, top: box.scrollTop, id: e.pointerId, moved: false };
+  });
+  box.addEventListener('pointermove', e => {
+    if (!pan) return;
+    const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+    if (!pan.moved) {
+      if (Math.hypot(dx, dy) < 4) return;
+      pan.moved = true;
+      box.setPointerCapture(pan.id);
+      box.classList.add('panning');
+      untip();
+    }
+    box.scrollLeft = pan.left - dx;
+    box.scrollTop = pan.top - dy;
+  });
+  const end = () => {
+    panned = !!pan && pan.moved;
+    pan = null;
+    box.classList.remove('panning');
+  };
+  addEventListener('pointerup', end);
+  addEventListener('pointercancel', end);
+  box.addEventListener('click', e => {
+    if (panned) { e.stopPropagation(); e.preventDefault(); panned = false; }
+  }, true);
+}
+zoomable($('diagram'), () => $('chart'), factor => { zoom = Math.max(0.125, Math.min(8, zoom * factor)); chart(); highlight(); });
+zoomable($('tree'), () => $('tree-area').firstElementChild, factor => { treeZoom = Math.max(0.25, Math.min(4, treeZoom * factor)); tree(); });
+pannable($('diagram'));
+pannable($('tree'));
+$('diagram').addEventListener('click', e => {
+  const box = $('diagram'), r = box.getBoundingClientRect();
+  if (e.target.onclick || e.clientX - r.left >= box.clientWidth || e.clientY - r.top >= box.clientHeight) return;
+  clearHighlight();
 });
 let resizeT;
-addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (D) { chart(); highlight(); } }, 150); });
+addEventListener('resize', () => {
+  clearTimeout(resizeT);
+  resizeT = setTimeout(() => {
+    if (mainEl.style.getPropertyValue('--diagram-width')) resizeDiagram($('diagram').offsetWidth);
+    if (D) { chart(); progress(); highlight(); tree(); }
+  }, 150);
+});
 addEventListener('dragover', e => { e.preventDefault(); $('drop').style.display = 'flex'; });
 addEventListener('dragleave', e => { if (e.target === $('drop')) $('drop').style.display = 'none'; });
 addEventListener('drop', e => {

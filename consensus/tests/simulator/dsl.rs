@@ -1,14 +1,15 @@
 use crate::simulator::rng::{SharedRng, SplitMix64};
 use crate::simulator::simulator::{GlobalState, ManualClock, Simulator};
 use crate::simulator::trace::{Trace, node, record_violation};
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use hotstuff_consensus::mocks::genesis::genesis_config;
 use hotstuff_consensus::mocks::kv::MemoryKV;
 use hotstuff_consensus::mocks::mempool::TestMempool;
-use hotstuff_consensus::mocks::scheme::TestScheme;
+use hotstuff_consensus::mocks::scheme::{TestCommand, TestScheme};
 use hotstuff_consensus::mocks::timeouts::FixedPolicy;
 use hotstuff_consensus::protocol::leaders::RoundRobin;
 use hotstuff_consensus::sm::NodeState;
+use hotstuff_consensus::storage::ReadStorage;
 use hotstuff_consensus::storage::kv_storage::KVStorage;
 use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::clock::ClockSource;
@@ -150,7 +151,15 @@ impl Setup {
         }
         let trace = self
             .verbose
-            .then(|| Trace::create(&self.describe(&starts), self.n, self.rng.seed()))
+            .then(|| {
+                Trace::create(
+                    &self.describe(&starts),
+                    self.n,
+                    self.rng.seed(),
+                    &self.byzantine,
+                    &self.crashed,
+                )
+            })
             .transpose()?;
         Ok(Simulator::new(
             clock,
@@ -191,6 +200,29 @@ pub fn min_committed_height(state: &State) -> u64 {
         .map(|id| state.committed_height(id))
         .min()
         .unwrap_or(0)
+}
+
+pub fn max_committed_height(state: &State) -> u64 {
+    state
+        .honest_nodes()
+        .map(|id| state.committed_height(id))
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn committed_proposers(state: &State, id: NodeID) -> Result<BTreeSet<NodeID>> {
+    let replica = state.replica(id).context("the node is not running")?;
+    let storage: &dyn ReadStorage<TestScheme, TestCommand> = replica.storage();
+    let mut proposers = BTreeSet::new();
+    let mut hash = storage.get_exec_hash()?;
+    while let Some(block) = storage.get_block_by_hash(&hash)? {
+        if block.height == 0 {
+            break;
+        }
+        proposers.insert(NodeID::from((block.cmd.0 / COMMAND_SPACE) as u32));
+        hash = block.parent;
+    }
+    Ok(proposers)
 }
 
 pub fn min_view(state: &State) -> View {

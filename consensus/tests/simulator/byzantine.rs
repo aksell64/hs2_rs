@@ -1,11 +1,16 @@
 use crate::simulator::simulator::{GlobalState, NodeEffects, Replica, no_effects};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use hotstuff_consensus::mocks::kv::MemoryKV;
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestScheme};
+use hotstuff_consensus::network::message::Message;
 use hotstuff_consensus::protocol::driver::DriverInput;
+use hotstuff_consensus::storage::ReadStorage;
 use hotstuff_consensus::storage::kv_storage::KVStorage;
+use hotstuff_consensus::types::block::Block;
 use hotstuff_consensus::types::clock::ClockSource;
+use hotstuff_consensus::types::crypto::Notary;
 use hotstuff_types::node::NodeID;
+use std::sync::Arc;
 
 pub type Input = DriverInput<TestScheme, TestCommand>;
 pub type Behavior<CS> =
@@ -46,5 +51,41 @@ impl<'a, CS: ClockSource> ByzantineContext<'a, CS> {
 
     pub fn inject(&mut self, input: Input) {
         self.replica.add_event_to_queue(input);
+    }
+}
+
+pub fn tail_fork<CS: ClockSource>(
+    committee_size: u32,
+) -> impl FnMut(&mut ByzantineContext<'_, CS>, Input) -> Result<NodeEffects<CS>> {
+    let notary = Notary::new(Arc::new(TestScheme {
+        n: committee_size,
+        id: None,
+    }));
+    move |ctx, input| {
+        let mut effects = ctx.apply_as_honest(input)?;
+        let storage: &dyn ReadStorage<TestScheme, TestCommand> = ctx.storage();
+        let lock = storage.get_locked_qc()?;
+        for envelope in &mut effects.net {
+            let Message::ProposalMsg(proposal) = &mut envelope.msg else {
+                continue;
+            };
+            if proposal.block.justify.view() <= lock.view() {
+                continue;
+            }
+            let parent = storage
+                .get_block_by_hash(&lock.block())?
+                .context("the locked block is not stored")?;
+            let height = parent.height + 1;
+            let cmd = proposal.block.cmd.clone();
+            let hash = notary.block_hash(&parent.hash, &cmd, &lock, height);
+            proposal.block = Block {
+                parent: parent.hash,
+                cmd,
+                justify: lock.clone(),
+                height,
+                hash,
+            };
+        }
+        Ok(effects)
     }
 }
