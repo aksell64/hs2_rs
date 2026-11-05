@@ -2,6 +2,7 @@ mod clock;
 mod rng;
 mod simulator;
 mod trace;
+mod viewer;
 mod dsl;
 mod scenarios;
 mod invariants;

@@ -1,3 +1,4 @@
+use crate::simulator::viewer::{self, ViewerTrace};
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestScheme};
 use hotstuff_consensus::network::message::{Message, Recipient};
 use hotstuff_consensus::sm::Effects;
@@ -7,7 +8,7 @@ use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::clock::Clock;
 use hotstuff_types::node::NodeID;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -26,6 +27,7 @@ pub struct Trace {
     head: String,
     notes: Vec<String>,
     lanes: Lanes,
+    pub viewer: ViewerTrace,
 }
 
 #[derive(PartialEq)]
@@ -68,7 +70,13 @@ impl Snapshot {
 }
 
 impl Trace {
-    pub fn create(setup: &str, n: u32, seed: u64) -> io::Result<Self> {
+    pub fn create(
+        setup: &str,
+        n: u32,
+        seed: u64,
+        byzantine: &BTreeSet<NodeID>,
+        crashed: &BTreeSet<NodeID>,
+    ) -> io::Result<Self> {
         let test = std::thread::current()
             .name()
             .and_then(|name| name.rsplit("::").next())
@@ -93,6 +101,7 @@ impl Trace {
             head: format!("# {title}\n\n{setup}\n\n"),
             notes: Vec::new(),
             lanes: Lanes::new(n),
+            viewer: ViewerTrace::new(&title, setup, n, byzantine, crashed),
         })
     }
 
@@ -101,6 +110,7 @@ impl Trace {
     }
 
     pub fn mark<CL: Debug>(&mut self, at: CL, label: &str) {
+        self.viewer.mark(&at, label);
         self.lanes.mark(at, label);
     }
 
@@ -122,7 +132,9 @@ impl Trace {
             writeln!(out, "{note}\n")?;
         }
         self.lanes.write(&mut out)?;
-        out.flush()
+        out.flush()?;
+        self.viewer
+            .write(&self.path.with_extension("json"), &self.notes)
     }
 }
 
@@ -252,7 +264,8 @@ pub fn record_violation(violation: &str) -> io::Result<()> {
     };
     let trace = fs::read_to_string(&path)?;
     let header = format!("**Violation:** {violation}\n\n{LANES_HEADER}");
-    fs::write(path, trace.replacen(LANES_HEADER, &header, 1))
+    fs::write(&path, trace.replacen(LANES_HEADER, &header, 1))?;
+    viewer::record_violation(&path.with_extension("json"), violation)
 }
 
 pub fn node(id: NodeID) -> String {

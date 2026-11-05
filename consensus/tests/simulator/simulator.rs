@@ -5,6 +5,7 @@ use crate::simulator::byzantine::{ByzantineContext, ByzantineProxy};
 use crate::simulator::clock::Timeline;
 use crate::simulator::rng::SharedRng;
 use crate::simulator::trace::{Snapshot, Trace, describe, node};
+use crate::simulator::viewer::NodeSnapshot;
 use anyhow::{Result, anyhow};
 use codec::{DecodeAll, Encode};
 use hotstuff_consensus::mocks::kv::MemoryKV;
@@ -39,6 +40,8 @@ pub type Replica<CS> = NodeState<
 
 pub type NodeEffects<CS> = Effects<TestScheme, TestCommand, <CS as ClockSource>::Clock>;
 
+const READ: &str = "in-memory storage read failed";
+
 pub fn no_effects<CL: Clock>() -> Effects<TestScheme, TestCommand, CL> {
     Effects {
         net: Vec::new(),
@@ -63,6 +66,7 @@ pub enum Event {
         node_id: NodeID,
     },
     Deliver {
+        id: u64,
         from: NodeID,
         to: NodeID,
         bytes: Vec<u8>,
@@ -75,6 +79,27 @@ pub enum Event {
         node_id: NodeID,
         timer: TimerEvent,
     },
+}
+
+impl Event {
+    fn action(&self) -> &'static str {
+        match self {
+            Event::Start { .. } => "start",
+            Event::Deliver { .. } => "deliver",
+            Event::Synced { .. } => "synced",
+            Event::Timer { timer, .. } => match timer {
+                TimerEvent::ViewTimeout(_) => "view_timeout",
+                TimerEvent::LockTimeout(_) => "lock_timeout",
+            },
+        }
+    }
+
+    fn message_id(&self) -> Option<u64> {
+        match self {
+            Event::Deliver { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 pub trait ManualClock: ClockSource + Clone {
@@ -161,12 +186,74 @@ impl<CS: ClockSource> GlobalState<CS> {
     }
 }
 
+impl<CS: ClockSource> GlobalState<CS>
+where
+    CS::Clock: Debug,
+{
+    fn stores_block(&self, id: NodeID, hash: &TestDigest) -> bool {
+        self.nodes.get(&id).is_some_and(|replica| {
+            let storage: &dyn ReadStorage<TestScheme, TestCommand> = replica.storage();
+            storage.get_block_by_hash(hash).expect(READ).is_some()
+        })
+    }
+
+    fn node_snapshots(&self, known: &[TestDigest]) -> BTreeMap<NodeID, NodeSnapshot> {
+        self.nodes
+            .iter()
+            .chain(&self.unstarted)
+            .map(|(id, replica)| (*id, self.node_snapshot(*id, replica, known)))
+            .collect()
+    }
+
+    fn node_snapshot(
+        &self,
+        id: NodeID,
+        replica: &Replica<CS>,
+        known: &[TestDigest],
+    ) -> NodeSnapshot {
+        let storage: &dyn ReadStorage<TestScheme, TestCommand> = replica.storage();
+        let view = storage.get_cur_view().expect(READ);
+        let high_qc = storage.get_high_qc().expect(READ);
+        let lock = storage.get_locked_qc().expect(READ);
+        let timers = self.timers.get(&id);
+        NodeSnapshot {
+            view,
+            leader: storage.get_cur_leader().expect(READ),
+            proposed: storage.get_proposed_view().expect(READ) == view,
+            high_qc: (high_qc.view(), high_qc.block()),
+            lock: (lock.view(), lock.block()),
+            voted_view: storage.get_voted_view().expect(READ),
+            exec_height: storage.get_exec_height().expect(READ),
+            exec_hash: storage.get_exec_hash().expect(READ),
+            committed: self.commits.get(&id).map_or_else(Vec::new, |log| {
+                log.iter().map(|commit| commit.hash).collect()
+            }),
+            stored: known
+                .iter()
+                .copied()
+                .filter(|hash| storage.get_block_by_hash(hash).expect(READ).is_some())
+                .collect(),
+            view_timers: timers.map_or_else(Vec::new, |timers| {
+                timers
+                    .view_timers()
+                    .iter()
+                    .map(|(view, deadline)| format!("v{view}@{deadline:?}"))
+                    .collect()
+            }),
+            lock_timer: timers
+                .and_then(TimerQueue::lock_timer)
+                .map(|timer| format!("v{}@{:?}", timer.view, timer.deadline)),
+        }
+    }
+}
+
 pub type Duration<CS> = <<CS as ClockSource>::Clock as Clock>::Duration;
 
 pub struct Simulator<CS: ClockSource> {
     state: GlobalState<CS>,
     trace: Option<Trace>,
     rng: SharedRng,
+    next_message_id: u64,
 }
 
 impl<CS: ManualClock> Simulator<CS>
@@ -187,7 +274,7 @@ where
             let at = starts.get(&node_id).copied().unwrap_or(clock.now());
             timeline.add_event(Event::Start { node_id }, at);
         }
-        Self {
+        let mut simulator = Self {
             state: GlobalState {
                 nodes: BTreeMap::new(),
                 unstarted: nodes,
@@ -201,6 +288,35 @@ where
             },
             trace,
             rng,
+            next_message_id: 0,
+        };
+        simulator.record_initial_state();
+        simulator
+    }
+
+    fn record_initial_state(&mut self) {
+        let Some(trace) = &mut self.trace else {
+            return;
+        };
+        let now = self.state.now();
+        trace
+            .viewer
+            .begin(now, None, "init", "initial state".to_owned());
+        let genesis = self.state.unstarted.values().next().and_then(|replica| {
+            let storage: &dyn ReadStorage<TestScheme, TestCommand> = replica.storage();
+            let hash = storage.get_exec_hash().expect(READ);
+            storage.get_block_by_hash(&hash).expect(READ)
+        });
+        if let Some(genesis) = genesis {
+            trace.viewer.block(&genesis, None, None);
+        }
+        self.record_nodes();
+    }
+
+    fn record_nodes(&mut self) {
+        if let Some(trace) = &mut self.trace {
+            let nodes = self.state.node_snapshots(trace.viewer.known_blocks());
+            trace.viewer.finish(nodes);
         }
     }
 
@@ -240,6 +356,7 @@ where
             return Ok(false);
         };
         self.execute_effects(now, node_id, effects, &mut adversary.delivery)?;
+        self.record_nodes();
         Ok(true)
     }
 
@@ -298,6 +415,8 @@ where
         self.state.clock.set(now);
 
         let traced = self.trace.is_some();
+        let (action, message_id) = (event.action(), event.message_id());
+        let mut synced = None;
         let (node_id, inputs, label) = match event {
             Event::Start { node_id } => {
                 if let Some(replica) = self.state.unstarted.remove(&node_id) {
@@ -306,7 +425,9 @@ where
                 }
                 (node_id, Vec::new(), traced.then(|| "start".to_owned()))
             }
-            Event::Deliver { from, to, bytes } => {
+            Event::Deliver {
+                from, to, bytes, ..
+            } => {
                 let msg = Message::<TestScheme, TestCommand>::decode_all(&mut &bytes[..])
                     .map_err(|err| anyhow!("undecodable message from {from:?}: {err:?}"))?;
                 let label =
@@ -316,11 +437,15 @@ where
             Event::Synced { node_id, blocks } => {
                 let label = traced.then(|| format!("synced {} blocks", blocks.len()));
                 let mut inputs = Vec::with_capacity(blocks.len());
+                let mut redundant = 0;
                 for bytes in blocks {
                     let block = Block::<TestScheme, TestCommand>::decode_all(&mut &bytes[..])
                         .map_err(|err| anyhow!("undecodable block: {err:?}"))?;
+                    redundant +=
+                        usize::from(traced && self.state.stores_block(node_id, &block.hash));
                     inputs.push(DriverInput::BlockSynced(block));
                 }
+                synced = Some((inputs.len(), redundant));
                 (node_id, inputs, label)
             }
             Event::Timer { node_id, timer } => {
@@ -339,6 +464,7 @@ where
         let proxy = byzantine
             .get_mut(&node_id)
             .and_then(|proxy| (proxy.activate_when)(&self.state).then_some(proxy));
+        let byzantine_active = proxy.is_some();
         let label = match &proxy {
             Some(_) => label.map(|label| format!("{label} [byzantine]")),
             None => label,
@@ -366,13 +492,25 @@ where
             let snapshot = self.snapshot(node_id);
             if let Some(trace) = &mut self.trace {
                 trace.step(now, node_id, &label, &effects, snapshot);
+                trace.viewer.begin(now, Some(node_id), action, label);
+                if let Some(id) = message_id {
+                    trace.viewer.received(id);
+                }
+                if byzantine_active {
+                    trace.viewer.tag("faulty");
+                }
+                if !effects.sync.is_empty() {
+                    trace.viewer.tag("sync");
+                }
+                if let Some((blocks, redundant)) = synced {
+                    trace.viewer.synced(blocks, redundant);
+                }
             }
         }
         Ok(Some((node_id, now, effects)))
     }
 
     fn snapshot(&self, node_id: NodeID) -> Option<Snapshot> {
-        const READ: &str = "in-memory storage read failed";
         let storage: &dyn ReadStorage<TestScheme, TestCommand> =
             self.state.nodes.get(&node_id)?.storage();
         let high_qc = storage.get_high_qc().expect(READ);
@@ -454,8 +592,16 @@ where
                     };
                     self.route(policy, now, &packet)
                 };
+                let id = self.next_message_id;
+                self.next_message_id += 1;
+                if let Some(trace) = &mut self.trace {
+                    trace
+                        .viewer
+                        .sent(id, node_id, to, &envelope.msg, at.is_none());
+                }
                 if let Some(at) = at {
                     let event = Event::Deliver {
+                        id,
                         from: node_id,
                         to,
                         bytes: bytes.clone(),

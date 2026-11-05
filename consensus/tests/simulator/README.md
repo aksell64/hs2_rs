@@ -31,3 +31,16 @@ name and leaves the others, so clear the directory to start fresh:
     rm -rf target/tmp/traces
 
 Revert the temporary changes before committing.
+
+### Viewer
+
+Next to each `.md` goes a `.json` in the format of the spec trace viewer. Open it with "Open trace…" in
+`docs/spec/quint/tools/viewer.html`, or inline it into one page:
+
+    python3 docs/spec/quint/tools/viz.py target/tmp/traces/<test>-<seed>.json --html trace.html
+
+`runner.mark(at, "label")` draws a labelled line across the diagram after the current step, and a row in the
+`.md`. Each simulator event is one step. The page header shows the setup, the notes from `runner.note` and the
+violation, if any; a failed trace opens at its last step, marked with a red line. A blocksync has no sender in the
+simulator, so it is a `sync` tag on the step and not an arrow; the step label and the `Progress` card count the
+blocks that were already stored. QCs have no signers, because a threshold signature does not reveal them.

@@ -41,6 +41,14 @@ impl<CL: Clock> TimerQueue<CL> {
         self.view_timers = self.view_timers.split_off(&view);
     }
 
+    pub fn view_timers(&self) -> &BTreeMap<View, CL> {
+        &self.view_timers
+    }
+
+    pub fn lock_timer(&self) -> Option<&ViewTimeout<CL>> {
+        self.lock_timer.as_ref()
+    }
+
     pub fn next_deadline(&self) -> Option<CL> {
         let view = self.view_timers.first_key_value().map(|(_, deadline)| *deadline);
         let lock = self.lock_timer.as_ref().map(|t| t.deadline);
