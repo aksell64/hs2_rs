@@ -331,11 +331,12 @@ function chart() {
     shape.onmouseleave = untip;
     const prev = D.steps[i - 1].nodes[s.actor], now = s.nodes[s.actor], els = [shape];
     const entered = prev && now && prev.view !== now.view;
-    if (labelsOn && D.rowGap >= 12) {
+    const captioned = labelsOn && D.rowGap >= 12;
+    if (captioned) {
       const last = s.actor === D.meta.hosts[D.meta.hosts.length - 1];
       els.push(el('text', { x: x + (last ? -11 : 11), y: y + 4, class: 'step-label', 'text-anchor': last ? 'end' : 'start' }, marks, fullCaption(i)));
-    } else if (showLabels && entered) els.push(el('text', { x: x + 11, y: y + 4, 'font-size': 10, style: 'fill:var(--muted)' }, marks, `v${now.view}`));
-    if (showLabels && D.qcAt[i]) els.push(el('text', { x: w - 4, y: y + 4, 'font-size': 10, 'text-anchor': 'end', style: 'fill:var(--accent)' }, marks, D.qcAt[i].map(q => `QC b${q.block}@v${q.view}`).join(' ')));
+    } else if (showLabels && entered) els.push(el('text', { x: x + 11, y: y + 4, 'font-size': 10, 'pointer-events': 'none', style: 'fill:var(--muted)' }, marks, `v${now.view}`));
+    if (showLabels && !captioned && D.qcAt[i]) els.push(el('text', { x: w - 4, y: y + 4, 'font-size': 10, 'text-anchor': 'end', 'pointer-events': 'none', style: 'fill:var(--accent)' }, marks, qcCaption(i)));
     D.stepEls.push({ step: i, actor: s.actor, els });
   });
   const overlay = el('g', { 'pointer-events': 'none' }, svg);
@@ -370,8 +371,11 @@ function stepCaption(i) {
 function fullCaption(i) {
   const s = D.steps[i], prev = i > 0 ? D.steps[i - 1].nodes[s.actor] : null, now = s.nodes[s.actor];
   const entered = prev && now && prev.view !== now.view;
-  return stepCaption(i) + (entered ? ` → v${now.view}` : '') + (s.tags.includes('commit') ? ' · commit' : '');
+  const qc = i > 0 && D.qcAt[i] ? ' · ' + qcCaption(i) : '';
+  return stepCaption(i) + qc + (entered ? ` → v${now.view}` : '') + (s.tags.includes('commit') ? ' · commit' : '');
 }
+
+const qcCaption = i => D.qcAt[i].map(q => `QC b${q.block}@v${q.view}`).join(' ');
 
 function markY(step, mark) {
   const end = D.rowTops[step + 1];

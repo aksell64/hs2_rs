@@ -1,5 +1,5 @@
 use super::adversary::*;
-use super::byzantine::tail_fork;
+use super::byzantine::{conflicting_proposal, tail_fork};
 use super::dsl::*;
 use super::invariants::*;
 use super::rng::SharedRng;
@@ -8,7 +8,9 @@ use super::simulator::no_effects;
 use anyhow::{Context as _, Result, ensure};
 use hotstuff_consensus::protocol::leaders::{LeaderPolicy, RoundRobin};
 use hotstuff_types::node::NodeID;
+use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 const DELTA: u64 = 10;
 const VIEW_TIMEOUT: u64 = 100;
@@ -16,6 +18,7 @@ const LOCK_TIMEOUT: u64 = 30;
 const VERBOSE: bool = false;
 
 const N4: u32 = 4;
+const N7: u32 = 7;
 
 #[test]
 fn sync_happy_path_test() -> Result<()> {
@@ -386,9 +389,116 @@ fn tail_fork_drops_blocks_of_previous_leader(seed: u64, verbose: bool) -> Result
 }
 
 #[test]
+fn byzantine_leader_conflicting_proposal_is_rejected_test() -> Result<()> {
+    let seeds = random_seeds(1_000);
+    for_each_seed(&seeds, byzantine_leader_conflicting_proposal_is_rejected)
+}
+
+// G -> B(v1) -> C(v2). After collecting QC(C), n3 withholds it and proposes G -> B'
+// in v3. B' has a genuine QC(G), but honest voters for C are already locked on B.
+fn byzantine_leader_conflicting_proposal_is_rejected(seed: u64, verbose: bool) -> Result<()> {
+    const ATTACK_VIEW: u64 = 3;
+    let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT)
+        .rng(SharedRng::new(seed))
+        .byzantine([3])
+        .verbose(verbose)
+        .build()?;
+    let attack = Rc::new(Cell::new(None));
+    let recorded_attack = Rc::clone(&attack);
+    let adversary = Adversary::new().byzantine(
+        3,
+        |_: &State| true,
+        conflicting_proposal(N4, ATTACK_VIEW, move |protected, fork| {
+            recorded_attack.set(Some((protected, fork)));
+        }),
+    );
+
+    let mut runner = Runner::new(setup);
+    runner.run(
+        Env::new()
+            .adversary(adversary)
+            .invariant(safety())
+            // The stale QC cannot advance peers to v3. Wait for their timers and the replay
+            // of the buffered fork, so rejection cannot be explained by a wrong current view.
+            .stop_cond(|state| min_view(state) >= ATTACK_VIEW)
+            .deadline(2 * VIEW_TIMEOUT),
+    )?;
+    let (protected, fork) = attack
+        .get()
+        .context("n3 never proposed the conflicting block")?;
+    proposal_rejected(ATTACK_VIEW, fork, 2, (1, protected))(runner.state())?;
+    runner.mark(runner.state().now(), "conflicting proposal rejected");
+
+    let silent = Adversary::new().byzantine(3, |_: &State| true, |_, _| Ok(no_effects()));
+    runner.run(
+        Env::new()
+            .adversary(silent)
+            .invariant(safety())
+            .stop_cond(|state| min_committed_height(state) >= 2)
+            .deadline(5 * VIEW_TIMEOUT),
+    )?;
+    for (id, log) in runner.state().honest_commit_logs() {
+        ensure!(
+            log.iter()
+                .any(|commit| commit.height == 1 && commit.hash == protected),
+            "{id:?} did not commit the protected block B"
+        );
+        ensure!(
+            log.iter().all(|commit| commit.hash != fork),
+            "{id:?} committed the conflicting block"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sync_after_gst_tc_waits_for_lagging_nodes_test() -> Result<()> {
+    sync_after_gst_tc_waits_for_lagging_nodes(0, true)
+}
+
+fn sync_after_gst_tc_waits_for_lagging_nodes(seed: u64, verbose: bool) -> Result<()> {
+    let delta = 5;
+    let view_timeout = 20 * delta;
+    let lock_timeout = 3 * delta;
+    let gst = 10 * view_timeout;
+    let end = gst + 10 * view_timeout;
+    let setup = setup(N7, delta, view_timeout, lock_timeout)
+        .rng(SharedRng::new(seed))
+        .byzantine([0, 1])
+        .verbose(verbose)
+        .build()?;
+
+    let lagging = || partition([&[5, 6]], gst, delta);
+    let mut runner = Runner::new(setup);
+    runner.run(
+        Env::new()
+            .adversary(Adversary::new().delivery(lagging()))
+            .invariant(safety())
+            .stop_cond(time_reached(gst)),
+    )?;
+    runner.mark(gst, "GST");
+
+    let leaders = RoundRobin::new(N7);
+    let view_at_gst = max_view(runner.state());
+    let epoch_view = leaders.epoch_start(view_at_gst) + leaders.epoch_length();
+    let silent = || {
+        let adversary = Adversary::new()
+            .delivery(lagging())
+            .byzantine(0, |_: &State| true, |_, _| Ok(no_effects()))
+            .byzantine(1, |_: &State| true, |_, _| Ok(no_effects()));
+        Env::new().adversary(adversary).invariant(safety())
+    };
+    runner.run(silent().stop_cond(move |state| max_view(state) >= epoch_view))?;
+    runner.mark(runner.state().now(), &format!("first in v{epoch_view}"));
+    runner.run(silent().stop_cond(move |state| min_view(state) >= epoch_view))?;
+    runner.mark(runner.state().now(), &format!("all in v{epoch_view}"));
+    runner.run(silent().stop_cond(time_reached(end)))
+}
+
+#[test]
 fn replay_seed() -> Result<()> {
     let seed = 500;
-    tail_fork_drops_blocks_of_previous_leader(500, true)
+    byzantine_leader_conflicting_proposal_is_rejected(500, true)
 }
 
 fn setup(n: u32, delta: u64, view_timeout: u64, lock_timeout: u64) -> Setup {
