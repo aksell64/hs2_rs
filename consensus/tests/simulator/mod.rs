@@ -9,3 +9,4 @@ mod invariants;
 mod adversary;
 mod runner;
 mod byzantine;
+mod blocksync;
