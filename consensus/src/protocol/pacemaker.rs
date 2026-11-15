@@ -159,7 +159,11 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         let epoch = self.leaders.epoch_of(view);
         if self.scheduled_epoch < Some(epoch) {
             self.scheduled_epoch = Some(epoch);
-            let deadlines = self.policy.epoch_deadlines(view..=self.leaders.epoch_end(view), start);
+            let deadlines = self.policy.epoch_deadlines(
+                self.leaders.epoch_start(view),
+                view..=self.leaders.epoch_end(view),
+                start,
+            );
             timers.push(Effect::Timer(TimerCommand::SetEpochTimers(deadlines)));
         }
         let entered = self.enter_view(storage, view, start)?;
@@ -276,5 +280,114 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
             return Ok(PacemakerResult::no_change());
         }
         self.process_qc(storage, status.qc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mocks::kv::MemoryKV;
+    use crate::mocks::scheme::{TestCommand, TestScheme, digest, qc};
+    use crate::mocks::timeouts::FixedPolicy;
+    use crate::protocol::leaders::RoundRobin;
+    use crate::storage::WriteStorage;
+    use crate::storage::kv_storage::KVStorage;
+    use crate::storage::staged::StagedStorage;
+    use crate::timer::queue::TimerQueue;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    struct TestClock(u64);
+
+    impl ClockSource for TestClock {
+        type Clock = u64;
+
+        fn now(&self) -> u64 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn epoch_deadlines_survive_qc_jumps_and_timer_transitions() -> Result<(), KVError> {
+        let id = NodeID::from(0);
+        let scheme = Arc::new(TestScheme { n: 4, id: Some(id) });
+        let store = KVStorage::new(MemoryKV::new());
+        let mut storage = StagedStorage::<TestScheme, TestCommand, _>::new(&store);
+        storage.update_cur_view(0)?;
+        storage.update_high_qc(qc(&scheme, 0, digest(0)))?;
+        let mut pacemaker = Pacemaker::new(
+            Notary::new(scheme.clone()),
+            id,
+            TestClock(0),
+            FixedPolicy {
+                view_timeout: 100,
+                lock_timeout: 30,
+            },
+            RoundRobin::new(4),
+        );
+        let mut timers = TimerQueue::new();
+        let steps = [
+            // Startup enters view 1 in the epoch starting at view 0.
+            (
+                0,
+                PacemakerInput::ViewTimerExpired(0),
+                1,
+                vec![(1, 200), (2, 300), (3, 400)],
+            ),
+            // First entry into epoch 4..=7 skips views 4 and 5.
+            (
+                10,
+                PacemakerInput::ReceivedQC(qc(&scheme, 5, digest(5))),
+                6,
+                vec![(6, 310), (7, 410)],
+            ),
+            // Advancing within the epoch preserves the original deadline.
+            (
+                20,
+                PacemakerInput::ReceivedQC(qc(&scheme, 6, digest(6))),
+                7,
+                vec![(7, 410)],
+            ),
+            // The next epoch gets a fresh entry time.
+            (
+                30,
+                PacemakerInput::ReceivedQC(qc(&scheme, 7, digest(7))),
+                8,
+                vec![(8, 130), (9, 230), (10, 330), (11, 430)],
+            ),
+            (
+                130,
+                PacemakerInput::ViewTimerExpired(8),
+                9,
+                vec![(9, 230), (10, 330), (11, 430)],
+            ),
+        ];
+
+        for (now, input, view, expected) in steps {
+            pacemaker.source.0 = now;
+            let result = pacemaker.apply(&mut storage, input)?;
+            for effect in result.effects {
+                match effect {
+                    Effect::Timer(TimerCommand::SetEpochTimers(epoch)) => {
+                        timers.set_epoch_timers(epoch)
+                    }
+                    Effect::Timer(TimerCommand::SetLockTimer(lock)) => timers.set_lock_timer(lock),
+                    Effect::Timer(TimerCommand::ClearLockTimer(view)) => {
+                        timers.stop_lock_timer(view)
+                    }
+                    Effect::Timer(TimerCommand::ClearViewTimersBelow(view)) => {
+                        timers.stop_view_timers_below(view)
+                    }
+                    Effect::Send(_) => {}
+                }
+            }
+            assert_eq!(storage.get_cur_view()?, view);
+            assert_eq!(
+                timers.view_timers(),
+                &BTreeMap::from_iter(expected),
+                "view {view} at {now}"
+            );
+        }
+        Ok(())
     }
 }

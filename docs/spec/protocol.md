@@ -128,11 +128,11 @@ procedure onReceiveQC(qc)
     if qc.viewNumber ≥ curView then
         advanceView(qc.viewNumber + 1)                        // Advance по сертификату
 
-procedure setTimers(v)                                       // вход в эпоху через ЛЮБОЙ её view
+procedure setTimers(v)                                       // первый вход в эпоху через любой её view
     e ← v − (v mod n)                                        // первый view эпохи
-    T ← now                                                  // now = начало слота для view v
-    for k ← (v − e) … (n − 1) do                             // пропущенные слоты не ставим
-        schedule ViewTimerFired(e + k) at T + (k − (v − e) + 1)·τ
+    a ← now                                                  // время первого входа узла в эпоху
+    for w ← v … (e + n − 1) do                              // текущий и следующие view эпохи
+        schedule ViewTimerFired(w) at a + (w − e + 1)·τ
 
 procedure advanceView(v')
     if v' ≤ curView then return

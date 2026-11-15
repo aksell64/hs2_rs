@@ -37,17 +37,23 @@ fn epoch_boundary_waits_for_tc_test() -> Result<()> {
 
     runner.run(env().stop_cond(time_reached(VIEW_TIMEOUT)))?;
     ensure!(
+        min_view(runner.state()) == 1 && max_view(runner.state()) == 1,
+        "view 1 occupies the second slot of the initial epoch"
+    );
+
+    runner.run(env().stop_cond(time_reached(2 * VIEW_TIMEOUT)))?;
+    ensure!(
         min_view(runner.state()) == 2 && max_view(runner.state()) == 2,
         "the timeout of view 1 must advance directly to view 2"
     );
 
-    runner.run(env().stop_cond(time_reached(2 * VIEW_TIMEOUT)))?;
+    runner.run(env().stop_cond(time_reached(3 * VIEW_TIMEOUT)))?;
     ensure!(
         min_view(runner.state()) == 3 && max_view(runner.state()) == 3,
         "the timeout of view 2 must advance directly to view 3"
     );
 
-    runner.run(env().stop_cond(time_reached(3 * VIEW_TIMEOUT)))?;
+    runner.run(env().stop_cond(time_reached(4 * VIEW_TIMEOUT)))?;
     ensure!(
         min_view(runner.state()) == 3 && max_view(runner.state()) == 3,
         "nodes must wait in view 3 for TC(4)"
@@ -56,7 +62,7 @@ fn epoch_boundary_waits_for_tc_test() -> Result<()> {
     runner.run(
         env()
             .stop_cond(|state| min_view(state) >= 4)
-            .deadline(3 * VIEW_TIMEOUT + 2 * DELTA),
+            .deadline(4 * VIEW_TIMEOUT + 2 * DELTA),
     )?;
     ensure!(max_view(runner.state()) == 4, "TC(4) must enter view 4");
     Ok(())
@@ -463,7 +469,7 @@ fn byzantine_leader_conflicting_proposal_is_rejected(seed: u64, verbose: bool) -
             // The stale QC cannot advance peers to v3. Wait for their timers and the replay
             // of the buffered fork, so rejection cannot be explained by a wrong current view.
             .stop_cond(|state| min_view(state) >= ATTACK_VIEW)
-            .deadline(2 * VIEW_TIMEOUT),
+            .deadline(3 * VIEW_TIMEOUT),
     )?;
     let (protected, fork) = attack
         .get()

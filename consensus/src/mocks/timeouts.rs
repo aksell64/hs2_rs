@@ -9,12 +9,16 @@ pub struct FixedPolicy<CL: Clock> {
 }
 
 impl<CL: Clock> TimeoutPolicy<CL> for FixedPolicy<CL> {
-    fn epoch_deadlines(&self, views: RangeInclusive<View>, start: CL) -> EpochTimeouts<CL> {
-        let first = *views.start();
+    fn epoch_deadlines(
+        &self,
+        epoch_start: View,
+        views: RangeInclusive<View>,
+        entered_at: CL,
+    ) -> EpochTimeouts<CL> {
         let timeouts = views
             .map(|view| {
-                let slots = (view - first + 1) as u32;
-                let deadline = start.add(CL::scale(self.view_timeout, slots));
+                let slots = (view - epoch_start + 1) as u32;
+                let deadline = entered_at.add(CL::scale(self.view_timeout, slots));
                 ViewTimeout { view, deadline }
             })
             .collect();
