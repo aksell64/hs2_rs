@@ -80,6 +80,32 @@ module scenariosTest {
   run happyPathTest =
     init.then(happy_until(3))
 
+  run epochBoundaryWaitsForTcTest =
+    val initial = init_pacemaker(1, GENESIS_QC)
+    val at1 = apply_pacemaker(initial, ViewTimerExpired(0))
+    val at2 = apply_pacemaker(at1.pacemaker, ViewTimerExpired(1))
+    val at3 = apply_pacemaker(at2.pacemaker, ViewTimerExpired(2))
+    val waiting = apply_pacemaker(at3.pacemaker, ViewTimerExpired(3))
+    val repeated = apply_pacemaker(waiting.pacemaker, ViewTimerExpired(3))
+    val tc = { certificate: { signature: QuorumCert(CORRECT) }, view: 4 }
+    val entered = apply_pacemaker(waiting.pacemaker, ReceivedTC(tc))
+    all {
+      at1.pacemaker.cur_view == 1,
+      1.to(3).forall(v => at1.effects.select(effect => effect == Timer(SetViewTimer(v))).length() == 1),
+      at2.pacemaker.cur_view == 2,
+      at2.pacemaker.sent_wish == Set(),
+      at3.pacemaker.cur_view == 3,
+      at3.pacemaker.sent_wish == Set(),
+      waiting.pacemaker.cur_view == 3,
+      waiting.pacemaker.sent_wish == Set(4),
+      waiting.effects == send_to_each(NODES, WishMsg(4)),
+      repeated.effects == [],
+      entered.pacemaker.cur_view == 4,
+      entered.pacemaker.scheduled_epoch == Some(1),
+      entered.effects.select(effect => effect == send_to(All, TCMsg(tc))).length() == 1,
+      4.to(7).forall(v => entered.effects.select(effect => effect == Timer(SetViewTimer(v))).length() == 1),
+    }
+
   def proposal(proposer: NodeID, version: int, view: View, justify: CertifiedBlock): Proposal =
     {
       block: {

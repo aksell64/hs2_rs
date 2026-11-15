@@ -21,6 +21,48 @@ const N4: u32 = 4;
 const N7: u32 = 7;
 
 #[test]
+fn epoch_boundary_waits_for_tc_test() -> Result<()> {
+    let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT).build()?;
+    let env = || {
+        // Keep QC formation out of this scenario so every view ends by its timer.
+        let delivery = |_: &Ctx, packet: &Packet| match packet.kind() {
+            Kind::Proposal | Kind::Vote => Fate::Drop,
+            _ => Fate::Delay(DELTA),
+        };
+        Env::new()
+            .adversary(Adversary::new().delivery(delivery))
+            .invariant(safety())
+    };
+    let mut runner = Runner::new(setup);
+
+    runner.run(env().stop_cond(time_reached(VIEW_TIMEOUT)))?;
+    ensure!(
+        min_view(runner.state()) == 2 && max_view(runner.state()) == 2,
+        "the timeout of view 1 must advance directly to view 2"
+    );
+
+    runner.run(env().stop_cond(time_reached(2 * VIEW_TIMEOUT)))?;
+    ensure!(
+        min_view(runner.state()) == 3 && max_view(runner.state()) == 3,
+        "the timeout of view 2 must advance directly to view 3"
+    );
+
+    runner.run(env().stop_cond(time_reached(3 * VIEW_TIMEOUT)))?;
+    ensure!(
+        min_view(runner.state()) == 3 && max_view(runner.state()) == 3,
+        "nodes must wait in view 3 for TC(4)"
+    );
+
+    runner.run(
+        env()
+            .stop_cond(|state| min_view(state) >= 4)
+            .deadline(3 * VIEW_TIMEOUT + 2 * DELTA),
+    )?;
+    ensure!(max_view(runner.state()) == 4, "TC(4) must enter view 4");
+    Ok(())
+}
+
+#[test]
 fn sync_happy_path_test() -> Result<()> {
     let seeds = random_seeds(1_000);
     for_each_seed(&seeds, sync_happy_path)
@@ -213,15 +255,16 @@ fn sync_after_gst_tc_waits_for_isolated_node(seed: u64, verbose: bool) -> Result
         .with_context(at_gst_msg)?;
     runner.mark(runner.state().now(), &format!("all in v{epoch_view}"));
 
-    // wait at most τ + 8Δ for a new commit. In the worst case n0 leads epoch_view and stays silent:
-    // the view timer takes τ, n1 then waits for its lock timer (3Δ), and Proposal, votes, Proposal,
-    // votes, Proposal take 5Δ.
+    // From the last entry, allow τ + 8Δ for a new commit. The silent n0 leads epoch_view,
+    // so n1 enters the next view within τ, waits for its lock timer (3Δ), then Proposal,
+    // votes, Proposal, votes and Proposal take 5Δ.
+    let all_entered_at = runner.state().now();
     let height = max_committed_height(runner.state());
     runner
         .run(
             env_n0_silent()
                 .stop_cond(move |state| min_committed_height(state) > height)
-                .deadline(first_entered_at + view_timeout + lock_timeout + 5 * delta),
+                .deadline(all_entered_at + view_timeout + lock_timeout + 5 * delta),
         )
         .with_context(|| {
             format!("no commits after entering view {epoch_view}: height {height}, gst = {gst}")
@@ -354,17 +397,16 @@ fn tail_fork_drops_blocks_of_previous_leader(seed: u64, verbose: bool) -> Result
 
     let adversary = Adversary::new().byzantine(3, |_: &State| true, tail_fork(N4));
     let mut runner = Runner::new(setup);
-    // The first 3Δ are Proposal, votes and Proposal up to the first view of n2. Then in each cycle
-    // others do not enter the view of n3 on its Proposal, because the QC in it is too old, so they
-    // wait for the view timer (τ). By then n0 has the votes of n3 and of n2, whose timer fired Δ
-    // earlier, so its own vote completes the QC at once. Then Proposal, votes, Proposal, votes and
-    // Proposal take 5Δ.
+    // The first 3Δ reach the first view of n2. In each cycle, the stale QC in n3's proposal
+    // makes peers wait for the penultimate view's timer, at most (epoch_length - 1)τ after
+    // epoch entry. Allow another 5Δ for QC collection and the following honest proposals.
+    let cycle_timeout = (RoundRobin::new(N4).epoch_length() - 1) * view_timeout;
     runner.run(
         Env::new()
             .adversary(adversary)
             .invariant(safety())
             .stop_cond(|state| min_view(state) >= LAST_VIEW)
-            .deadline(3 * delta + CYCLES * (view_timeout + 5 * delta)),
+            .deadline(3 * delta + CYCLES * (cycle_timeout + 5 * delta)),
     )?;
 
     // Every view has one block. One block of n2 is dropped per cycle, and the blocks of the last

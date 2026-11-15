@@ -51,10 +51,10 @@ module types {
 
   const committee_size: int
 
-  pure def faulty(n: int): int = (n - 1) / 3
+  pure def f(n: int): int = (n - 1) / 3
 
   pure def quorum(n: int): int =
-    if (n - faulty(n) > 1) n - faulty(n) else 1
+    if (n - f(n) > 1) n - f(n) else 1
 
   pure val hash_variants: int = 2
 
@@ -63,7 +63,7 @@ module types {
 
   pure def block_hash(view: View, proposer: NodeID): Hash = block_variant_hash(view, proposer, 0)
 
-  pure def timeout_quorum(n: int): int = 2 * faulty(n) + 1
+  pure def timeout_quorum(n: int): int = 2 * f(n) + 1
 
   pure def is_valid_qc(qc: CertifiedBlock): bool =
     match qc.certificate.signature {

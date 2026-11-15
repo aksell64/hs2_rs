@@ -54,7 +54,7 @@ module pacemaker {
 
   pure def is_leader(pcm: Pacemaker, view: View): bool = pcm.id == leader(view)
 
-  pure val epoch_length: int = faulty(committee_size) + 1
+  pure val epoch_length: int = committee_size
 
   pure def epoch_leaders(view: View): Set[NodeID] =
     0.to(epoch_length - 1).map(k => leader(view - view % epoch_length + k))
