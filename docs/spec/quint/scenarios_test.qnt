@@ -106,6 +106,81 @@ module scenariosTest {
       4.to(7).forall(v => entered.effects.select(effect => effect == Timer(SetViewTimer(v))).length() == 1),
     }
 
+  pure val EPOCH_BOUNDARY_QC: CertifiedBlock = {
+    certificate: { signature: QuorumCert(CORRECT) },
+    block: block_hash(3, 3),
+    view: 3,
+  }
+
+  run epochQcRelayedOnceTest =
+    val qc2 = EPOCH_BOUNDARY_QC.with("view", 2).with("block", block_hash(2, 2))
+    val at3 = apply_pacemaker(init_pacemaker(1, GENESIS_QC), ReceivedQC(qc2))
+    val entered = apply_pacemaker(at3.pacemaker, ReceivedQC(EPOCH_BOUNDARY_QC))
+    val repeated = apply_pacemaker(entered.pacemaker, ReceivedQC(EPOCH_BOUNDARY_QC))
+    all {
+      at3.pacemaker.cur_view == 3,
+      entered.pacemaker.cur_view == 4,
+      entered.pacemaker.high_qc == EPOCH_BOUNDARY_QC,
+      entered.pacemaker.scheduled_epoch == Some(1),
+      entered.effects.head() == send_to(All, QCMsg(EPOCH_BOUNDARY_QC)),
+      entered.effects.select(effect => effect == send_to(All, QCMsg(EPOCH_BOUNDARY_QC))).length() == 1,
+      4.to(7).forall(v => entered.effects.select(effect => effect == Timer(SetViewTimer(v))).length() == 1),
+      repeated == pacemaker_no_change(entered.pacemaker),
+    }
+
+  run qcInsideEpochIsNotRelayedTest =
+    val qc2 = EPOCH_BOUNDARY_QC.with("view", 2).with("block", block_hash(2, 2))
+    val qc5 = EPOCH_BOUNDARY_QC.with("view", 5).with("block", block_hash(5, 1))
+    val at3 = apply_pacemaker(init_pacemaker(1, GENESIS_QC), ReceivedQC(qc2))
+    val at6 = apply_pacemaker(at3.pacemaker, ReceivedQC(qc5))
+    all {
+      at3.pacemaker.cur_view == 3,
+      at3.effects.select(effect => effect == send_to(All, QCMsg(qc2))).length() == 0,
+      at6.pacemaker.cur_view == 6,
+      at6.pacemaker.scheduled_epoch == Some(1),
+      at6.effects.select(effect => effect == send_to(All, QCMsg(qc5))).length() == 0,
+    }
+
+  run epochQcAfterTcIsNotRelayedTest =
+    val tc = { certificate: { signature: QuorumCert(CORRECT) }, view: 4 }
+    val entered = apply_pacemaker(init_pacemaker(1, GENESIS_QC), ReceivedTC(tc))
+    val received = apply_pacemaker(entered.pacemaker, ReceivedQC(EPOCH_BOUNDARY_QC))
+    all {
+      received.pacemaker.cur_view == 4,
+      received.pacemaker.high_qc == EPOCH_BOUNDARY_QC,
+      received.effects == [],
+      received.out == NoPacemakerOutput,
+    }
+
+  run invalidEpochQcIsIgnoredTest =
+    val initial = init_pacemaker(1, GENESIS_QC)
+    Set(InvalidCert, QuorumCert(Set(1, 2))).forall(signature =>
+      val invalid = EPOCH_BOUNDARY_QC.with("certificate", { signature: signature })
+      apply_pacemaker(initial, ReceivedQC(invalid)) == pacemaker_no_change(initial))
+
+  // The faulty collector n0 reveals QC(3) only to n1 after receiving all honest votes.
+  // Honest nodes relay the QC and enter view 4 through message delivery alone.
+  run epochQcReachesAllHonestNodesTest =
+    val vote = VoteMsg({ view: EPOCH_BOUNDARY_QC.view, block: EPOCH_BOUNDARY_QC.block })
+    val message = QCMsg(EPOCH_BOUNDARY_QC)
+    init
+      .then(happy_until(3))
+      .then(checked_step(1))
+      .then(checked_step(2))
+      .then(checked_step(3))
+      .expect(CORRECT.forall(id => view_of(id) == 3 and voted_of(id) == 3))
+      .expect(CORRECT.forall(id => net.inbox.get(0).select(packet => packet == { sender: id, msg: vote }).length() == 1))
+      .then(inject(1, { sender: 0, msg: message }))
+      .then(checked_step(1))
+      .expect(view_of(1) == 4 and view_of(2) == 3 and view_of(3) == 3)
+      .expect(Set(2, 3).forall(id => net.inbox.get(id).select(packet => packet == { sender: 1, msg: message }).length() == 1))
+      .then(checked_step(2))
+      .then(checked_step(3))
+      .expect(CORRECT.forall(id => view_of(id) == 4 and high_qc_of(id) == EPOCH_BOUNDARY_QC))
+      // Drain self-delivery and duplicates to check that rebroadcasting terminates.
+      .then(CORRECT.size().reps(_ => checked_step(1).then(checked_step(2)).then(checked_step(3))))
+      .expect(CORRECT.forall(id => not(has_messages(id)) and view_of(id) == 4))
+
   def proposal(proposer: NodeID, version: int, view: View, justify: CertifiedBlock): Proposal =
     {
       block: {

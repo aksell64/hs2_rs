@@ -1,5 +1,5 @@
 use super::adversary::*;
-use super::byzantine::{conflicting_proposal, tail_fork};
+use super::byzantine::{conflicting_proposal, reveal_qc_to_one, tail_fork};
 use super::dsl::*;
 use super::invariants::*;
 use super::rng::SharedRng;
@@ -65,6 +65,56 @@ fn epoch_boundary_waits_for_tc_test() -> Result<()> {
             .deadline(4 * VIEW_TIMEOUT + 2 * DELTA),
     )?;
     ensure!(max_view(runner.state()) == 4, "TC(4) must enter view 4");
+    Ok(())
+}
+
+#[test]
+fn epoch_qc_relay_synchronizes_honest_nodes_test() -> Result<()> {
+    for_each_seed(&random_seeds(100), epoch_qc_relay_synchronizes_honest_nodes)
+}
+
+fn epoch_qc_relay_synchronizes_honest_nodes(seed: u64, verbose: bool) -> Result<()> {
+    let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT)
+        .rng(SharedRng::new(seed))
+        .byzantine([0])
+        .verbose(verbose)
+        .build()?;
+    let adversary =
+        Adversary::new().byzantine(0, |_: &State| true, reveal_qc_to_one(4, NodeID::from(1)));
+    let mut runner = Runner::new(setup);
+    runner.run(
+        Env::new()
+            .adversary(adversary)
+            .invariant(safety())
+            .invariant(no_view_timeouts())
+            .stop_cond(|state| max_view(state) >= 4)
+            .deadline(7 * DELTA),
+    )?;
+    let first_entered_at = runner.state().now();
+    ensure!(
+        runner.state().honest_views().collect::<Vec<_>>()
+            == vec![
+                (NodeID::from(1), 4),
+                (NodeID::from(2), 3),
+                (NodeID::from(3), 3)
+            ],
+        "the QC must initially reach only n1"
+    );
+
+    // The collector stays silent while honest nodes disseminate QC(3).
+    let silent = Adversary::new().byzantine(0, |_: &State| true, |_, _| Ok(no_effects()));
+    runner.run(
+        Env::new()
+            .adversary(silent)
+            .invariant(safety())
+            .invariant(no_view_timeouts())
+            .stop_cond(|state| min_view(state) >= 4)
+            .deadline(first_entered_at + DELTA),
+    )?;
+    ensure!(
+        max_view(runner.state()) == 4,
+        "all honest nodes must be in view 4"
+    );
     Ok(())
 }
 
@@ -351,15 +401,17 @@ fn sync_after_gst_random_delays_no_byzantine(seed: u64, verbose: bool) -> Result
         )
         .with_context(at_gst_msg)?;
 
-    // From here on votes and the next Proposal take 2Δ, and entering a view commits the block of
-    // two views before, so only the blocks of the last two views stay uncommitted.
+    // From here on votes and the next Proposal take 2Δ. Processing the Proposal commits the
+    // block of two views before. At an epoch boundary a standalone QC can advance the view first.
     for view in epoch_view + 2..=epoch_view + VIEWS_AFTER_ENTRY {
         let entered_at = runner.state().now();
         let height = min_committed_height(runner.state());
         runner
             .run(
                 env()
-                    .stop_cond(move |state| min_view(state) >= view)
+                    .stop_cond(move |state| {
+                        min_view(state) >= view && min_committed_height(state) > height
+                    })
                     .deadline(entered_at + 2 * delta),
             )
             .with_context(at_gst_msg)?;

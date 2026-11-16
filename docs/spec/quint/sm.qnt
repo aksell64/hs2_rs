@@ -30,6 +30,7 @@ module state_machine {
       | WishMsg(view) => NewWish({ sender: packet.sender, view: view })
       | StatusMsg(status) => NewStatus({ sender: packet.sender, qc: status.qc, view: status.view })
       | TCMsg(tc) => NewTC(tc)
+      | QCMsg(qc) => NewQC(qc)
     }
 
   pure def pop_from_network(state: NodeState, net: Network): { input: Option[DriverInput], net: Network } =

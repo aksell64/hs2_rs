@@ -13,7 +13,7 @@ use crate::storage::{KVError, ReadWriteStorage};
 use crate::timer::service::TimerCommand;
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
-use crate::types::certificate::{SignedVote, SignedWish, TimeoutQC};
+use crate::types::certificate::{BlockQC, SignedVote, SignedWish, TimeoutQC};
 use crate::types::clock::{Clock, ClockSource};
 use crate::types::crypto::Notary;
 use crate::types::mempool::Mempool;
@@ -31,6 +31,7 @@ pub enum DriverInput<S: Scheme, C: Command> {
     NewWish(SignedWish<S>),
     NewStatus(Status<S>),
     NewTC(TimeoutQC<S>),
+    NewQC(BlockQC<S>),
     ViewTimerFired(View),
     LockTimerFired(View),
     BlockSynced(Block<S, C>),
@@ -153,6 +154,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
                 vec![Task::Pacemaker(PacemakerInput::ReceivedStatus(status))]
             }
             DriverInput::NewTC(tc) => vec![Task::Pacemaker(PacemakerInput::ReceivedTC(tc))],
+            DriverInput::NewQC(qc) => vec![Task::Pacemaker(PacemakerInput::ReceivedQC(qc))],
             DriverInput::ViewTimerFired(view) => {
                 vec![Task::Pacemaker(PacemakerInput::ViewTimerExpired(view))]
             }

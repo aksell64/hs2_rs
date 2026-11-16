@@ -12,6 +12,7 @@ module driver {
   | NewWish({ sender: NodeID, view: View })
   | NewStatus({ sender: NodeID, qc: CertifiedBlock, view: View })
   | NewTC(CertifiedView)
+  | NewQC(CertifiedBlock)
   | ViewTimerFired(View)
   | LockTimerFired(View)
   | BlockSynced(Block)
@@ -56,6 +57,7 @@ module driver {
       | NewWish(wish) => on_wish(d, kv, wish)
       | NewStatus(status) => on_status(d, kv, status)
       | NewTC(tc) => on_timeout_certificate(d, kv, tc)
+      | NewQC(qc) => on_quorum_certificate(d, kv, qc)
       | ViewTimerFired(v) => on_view_timer_fired(d, kv, v)
       | LockTimerFired(v) => on_lock_timer_fired(d, kv, v)
       | BlockSynced(block) => on_block_synced(d, kv, block)
@@ -221,6 +223,10 @@ module driver {
 
   pure def on_timeout_certificate(d: Driver, kv: KVStorage, tc: CertifiedView): DriverResult =
     val called = call_pacemaker(d, ReceivedTC(tc))
+    handle_pacemaker_result(d, kv, called)
+
+  pure def on_quorum_certificate(d: Driver, kv: KVStorage, qc: CertifiedBlock): DriverResult =
+    val called = call_pacemaker(d, ReceivedQC(qc))
     handle_pacemaker_result(d, kv, called)
 
   pure def on_wish(d: Driver, kv: KVStorage, wish: { sender: NodeID, view: View }): DriverResult =

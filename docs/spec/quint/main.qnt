@@ -143,7 +143,8 @@ module main {
       })
 
   action deliver_faulty(id: NodeID): bool = {
-    val packets = faulty_votes.union(faulty_proposals(all_qcs, all_blocks(nodes)))
+    val qc_packets = tuples(FAULTY, all_qcs).map(t => { sender: t._1, msg: QCMsg(t._2) })
+    val packets = faulty_votes.union(faulty_proposals(all_qcs, all_blocks(nodes))).union(qc_packets)
     nondet packet = packets.oneOf()
     all {
       nodes' = nodes.put(id, push_to_queue(nodes.get(id), packet_to_input(packet))),
@@ -281,6 +282,14 @@ module main {
   }
 
   val no_commit_witness = CORRECT.forall(id => nodes.get(id).kv.committed_branch.length() == 0)
+
+  val epoch_qc_relay_witness =
+    net.inbox.keys().exists(id => net.inbox.get(id).indices().exists(index =>
+      val packet = net.inbox.get(id)[index]
+      CORRECT.contains(packet.sender) and match packet.msg {
+        | QCMsg(qc) => (qc.view + 1) % epoch_length == 0
+        | _ => false
+      }))
 
   // Tail-forking: the block certified in view v is dropped by the certified block of view v + 1.
   val tail_fork_witness =

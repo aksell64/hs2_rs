@@ -114,6 +114,9 @@ upon NewWish(m = ⟨wish, v', σ⟩ from p)
 upon NewTC(tc)
     processTC(tc)
 
+upon NewQC(qc)
+    onReceiveQC(qc)
+
 upon NewStatus(m = statusMsg_v(qc, view))
     if u ≠ getLeader(view) then return
     onReceiveQC(qc)                                          // сначала: verify + может продвинуть curView
@@ -126,7 +129,10 @@ procedure onReceiveQC(qc)
     if qc.viewNumber > qc_high.viewNumber then               // ранг по view (не по высоте!)
         qc_high ← qc
     if qc.viewNumber ≥ curView then
-        advanceView(qc.viewNumber + 1)                        // Advance по сертификату
+        nextView ← qc.viewNumber + 1
+        if nextView mod n = 0 then                           // вход в первый view эпохи по граничному QC
+            broadcast(msg_u(QC, qc))
+        advanceView(nextView)                                // Advance по сертификату
 
 procedure setTimers(v)                                       // первый вход в эпоху через любой её view
     e ← v − (v mod n)                                        // первый view эпохи

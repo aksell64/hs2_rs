@@ -2,7 +2,7 @@ use crate::simulator::simulator::{GlobalState, NodeEffects, Replica, no_effects}
 use anyhow::{Context as _, Result, ensure};
 use hotstuff_consensus::mocks::kv::MemoryKV;
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestDigest, TestScheme};
-use hotstuff_consensus::network::message::Message;
+use hotstuff_consensus::network::message::{Envelope, Message, Recipient};
 use hotstuff_consensus::protocol::driver::DriverInput;
 use hotstuff_consensus::storage::ReadStorage;
 use hotstuff_consensus::storage::kv_storage::KVStorage;
@@ -87,6 +87,40 @@ pub fn tail_fork<CS: ClockSource>(
                 hash,
             };
         }
+        Ok(effects)
+    }
+}
+
+/// Reveal the QC for `view - 1` to one recipient when proposing `view`, then remain silent.
+pub fn reveal_qc_to_one<CS: ClockSource>(
+    view: View,
+    recipient: NodeID,
+) -> impl FnMut(&mut ByzantineContext<'_, CS>, Input) -> Result<NodeEffects<CS>> {
+    let mut revealed = false;
+    move |ctx, input| {
+        if revealed {
+            return Ok(no_effects());
+        }
+        let effects = ctx.apply_as_honest(input)?;
+        let qc = effects.net.iter().find_map(|envelope| match &envelope.msg {
+            Message::ProposalMsg(proposal) if proposal.view == view => {
+                Some(proposal.block.justify.clone())
+            }
+            _ => None,
+        });
+        let Some(qc) = qc else {
+            return Ok(effects);
+        };
+        ensure!(
+            qc.view() + 1 == view,
+            "the leader did not collect the preceding QC"
+        );
+        revealed = true;
+        let mut effects = no_effects();
+        effects.net.push(Envelope {
+            to: Recipient::Node(recipient),
+            msg: Message::QCMsg(qc),
+        });
         Ok(effects)
     }
 }

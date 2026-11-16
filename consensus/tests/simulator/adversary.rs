@@ -113,6 +113,7 @@ pub enum Kind {
     Wish,
     Status,
     Tc,
+    Qc,
     Sync,
 }
 
@@ -132,6 +133,7 @@ impl Packet<'_> {
                 Message::WishMsg(_) => Kind::Wish,
                 Message::StatusMsg { .. } => Kind::Status,
                 Message::TCMsg(_) => Kind::Tc,
+                Message::QCMsg(_) => Kind::Qc,
             },
             Payload::Sync { .. } => Kind::Sync,
         }
@@ -145,6 +147,7 @@ impl Packet<'_> {
                 Message::WishMsg(wish) => wish.view(),
                 Message::StatusMsg { view, .. } => *view,
                 Message::TCMsg(tc) => tc.view(),
+                Message::QCMsg(qc) => qc.view(),
             }),
             Payload::Sync { .. } => None,
         }

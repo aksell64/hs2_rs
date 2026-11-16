@@ -92,7 +92,11 @@ module pacemaker {
     else
       val updated = pcm.with("high_qc", qc)
       if (qc.view >= updated.cur_view)
-        advance_view(updated, qc.view + 1)
+        val next_view = qc.view + 1
+        val relay =
+          if (next_view % epoch_length == 0) [send_to(All, QCMsg(qc))]
+          else []
+        with_effects(relay, advance_view(updated, next_view))
       else
         pacemaker_no_change(updated)
 

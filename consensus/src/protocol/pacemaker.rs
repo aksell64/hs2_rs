@@ -9,10 +9,10 @@ use crate::types::block::Command;
 use crate::types::certificate::{BlockQC, TimeoutQC};
 use crate::types::clock::{Clock, ClockSource};
 use crate::types::crypto::Notary;
+use crate::types::wish::Wish;
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
 use std::collections::BTreeSet;
-use crate::types::wish::Wish;
 
 pub enum PacemakerInput<S: Scheme> {
     ReceivedQC(BlockQC<S>),
@@ -53,12 +53,7 @@ impl<S: Scheme, C: Command, CL: Clock> PacemakerResult<S, C, CL> {
     }
 }
 
-pub struct Pacemaker<
-    S: Scheme,
-    TP: TimeoutPolicy<CS::Clock>,
-    CS: ClockSource,
-    LP: LeaderPolicy,
-> {
+pub struct Pacemaker<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy> {
     notary: Notary<S>,
     id: NodeID,
     statuses: BTreeSet<NodeID>,
@@ -76,13 +71,7 @@ type PacemakerApply<S, C, CL> = Result<PacemakerResult<S, C, CL>, KVError>;
 impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
     Pacemaker<S, TP, CS, LP>
 {
-    pub fn new(
-        notary: Notary<S>,
-        id: NodeID,
-        source: CS,
-        policy: TP,
-        leaders: LP,
-    ) -> Self {
+    pub fn new(notary: Notary<S>, id: NodeID, source: CS, policy: TP, leaders: LP) -> Self {
         Self {
             notary,
             id,
@@ -133,7 +122,13 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         }
         storage.update_high_qc(qc.clone())?;
         if qc.view() >= storage.get_cur_view()? {
-            self.advance_view(storage, qc.view() + 1)
+            let next_view = qc.view() + 1;
+            let advanced = self.advance_view(storage, next_view)?;
+            if self.leaders.is_epoch_start(next_view) {
+                Ok(advanced.with_effects(vec![send_to(Recipient::All, Message::QCMsg(qc))]))
+            } else {
+                Ok(advanced)
+            }
         } else {
             Ok(PacemakerResult::no_change())
         }
@@ -287,13 +282,16 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
 mod tests {
     use super::*;
     use crate::mocks::kv::MemoryKV;
-    use crate::mocks::scheme::{TestCommand, TestScheme, digest, qc};
+    use crate::mocks::scheme::{TestCommand, TestScheme, TestSignature, digest, qc};
     use crate::mocks::timeouts::FixedPolicy;
+    use crate::network::message::Envelope;
     use crate::protocol::leaders::RoundRobin;
     use crate::storage::WriteStorage;
     use crate::storage::kv_storage::KVStorage;
     use crate::storage::staged::StagedStorage;
     use crate::timer::queue::TimerQueue;
+    use codec::Encode;
+    use hotstuff_crypto::sign::PartialSignature;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -305,6 +303,105 @@ mod tests {
         fn now(&self) -> u64 {
             self.0
         }
+    }
+
+    #[test]
+    fn qc_is_broadcast_only_when_entering_epoch_boundary() -> Result<(), KVError> {
+        let id = NodeID::from(1);
+        let scheme = Arc::new(TestScheme { n: 4, id: Some(id) });
+        let notary = Notary::new(scheme.clone());
+        let store = KVStorage::new(MemoryKV::new());
+        let mut storage = StagedStorage::<TestScheme, TestCommand, _>::new(&store);
+        storage.update_cur_view(0)?;
+        storage.update_high_qc(qc(&scheme, 0, digest(0)))?;
+        let tc = notary
+            .aggregate(
+                Wish { view: 8 },
+                (0..3).map(|id| PartialSignature::new(NodeID::from(id), TestSignature)),
+            )
+            .unwrap();
+        let mut invalid = qc(&scheme, 3, digest(3));
+        invalid.subject.block = digest(99);
+        let mut pacemaker = Pacemaker::new(
+            notary,
+            id,
+            TestClock(0),
+            FixedPolicy {
+                view_timeout: 100,
+                lock_timeout: 30,
+            },
+            RoundRobin::new(4),
+        );
+        let steps = [
+            (
+                "inside epoch",
+                PacemakerInput::ReceivedQC(qc(&scheme, 2, digest(2))),
+                3,
+                2,
+                0,
+            ),
+            ("invalid QC", PacemakerInput::ReceivedQC(invalid), 3, 2, 0),
+            (
+                "epoch boundary",
+                PacemakerInput::ReceivedQC(qc(&scheme, 3, digest(3))),
+                4,
+                3,
+                1,
+            ),
+            (
+                "duplicate QC",
+                PacemakerInput::ReceivedQC(qc(&scheme, 3, digest(3))),
+                4,
+                3,
+                0,
+            ),
+            (
+                "middle of epoch",
+                PacemakerInput::ReceivedQC(qc(&scheme, 5, digest(5))),
+                6,
+                5,
+                0,
+            ),
+            ("entry by TC", PacemakerInput::ReceivedTC(tc), 8, 5, 0),
+            (
+                "QC after TC",
+                PacemakerInput::ReceivedQC(qc(&scheme, 7, digest(7))),
+                8,
+                7,
+                0,
+            ),
+            (
+                "later epoch",
+                PacemakerInput::ReceivedQC(qc(&scheme, 11, digest(11))),
+                12,
+                11,
+                1,
+            ),
+        ];
+
+        for (case, input, view, high_qc_view, broadcasts) in steps {
+            let result = pacemaker.apply(&mut storage, input)?;
+            assert_eq!(storage.get_cur_view()?, view, "{case}");
+            let high_qc = storage.get_high_qc()?;
+            assert_eq!(high_qc.view(), high_qc_view, "{case}");
+            let relayed: Vec<_> = result
+                .effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Send(Envelope {
+                        to,
+                        msg: Message::QCMsg(qc),
+                    }) => Some((to, qc)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(relayed.len(), broadcasts, "{case}");
+            for (to, qc) in relayed {
+                assert!(matches!(to, Recipient::All), "{case}");
+                assert_eq!(qc.encode(), high_qc.encode(), "{case}");
+            }
+        }
+        Ok(())
     }
 
     #[test]
