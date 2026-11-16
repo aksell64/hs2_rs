@@ -270,6 +270,8 @@ module main {
 
   val ancestry_inv = certified_extends_justify(qc_views, all_blocks(nodes))
 
+  val block_dependencies_inv = CORRECT.forall(id => block_dependencies_ready(nodes.get(id)))
+
   val safety_inv = and {
     agreement_inv,
     lock_monotonic_inv,
@@ -279,9 +281,12 @@ module main {
     once_qc_in_view_inv,
     lock_protection_inv,
     ancestry_inv,
+    block_dependencies_inv,
   }
 
   val no_commit_witness = CORRECT.forall(id => nodes.get(id).kv.committed_branch.length() == 0)
+
+  val blocksync_requested_witness = CORRECT.exists(id => has_sync_requests(id))
 
   val epoch_qc_relay_witness =
     net.inbox.keys().exists(id => net.inbox.get(id).indices().exists(index =>

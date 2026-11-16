@@ -6,6 +6,7 @@ module scenariosTest {
   import state_machine.* from "./sm"
   import pacemaker.* from "./pacemaker"
   import invariants.* from "./invariants"
+  import blocksync.* from "./blocksync"
   import main(committee_size = 4, FAULTY = Set(0), BYZANTINE = Set(), MAX_VIEW = 6, FAULTY_PERCENT = 0, TIMER_PERCENT = 0).* from "./main"
 
   action unchanged: bool = all {
@@ -252,6 +253,134 @@ module scenariosTest {
   def stored(id: NodeID, hash: Hash): bool =
     nodes.get(id).kv.block_by_hash.keys().contains(hash)
 
+  pure val SYNC_BLOCK_1 = create_leaf(block_hash(1, 1), GENESIS.hash, GENESIS_QC, 1)
+  pure val SYNC_QC_1: CertifiedBlock = {
+    certificate: { signature: QuorumCert(CORRECT) }, block: SYNC_BLOCK_1.hash, view: 1
+  }
+  pure val SYNC_BLOCK_2 = create_leaf(block_hash(2, 2), SYNC_BLOCK_1.hash, SYNC_QC_1, 2)
+  pure val SYNC_QC_2: CertifiedBlock = {
+    certificate: { signature: QuorumCert(CORRECT) }, block: SYNC_BLOCK_2.hash, view: 2
+  }
+  pure val SYNC_BLOCK_3 = create_leaf(block_hash(3, 3), SYNC_BLOCK_2.hash, SYNC_QC_2, 3)
+  pure val SYNC_SOURCE = Map(
+    GENESIS.hash -> GENESIS,
+    SYNC_BLOCK_1.hash -> SYNC_BLOCK_1,
+    SYNC_BLOCK_2.hash -> SYNC_BLOCK_2,
+    SYNC_BLOCK_3.hash -> SYNC_BLOCK_3
+  )
+
+  // QC(3) must wait for the full chain, including when a TC already moved us to view 8.
+  run qcChainIsProcessedBeforeAdvanceTest =
+    Set(0, 8).forall(view =>
+      val initial = init_node(1)
+      val started =
+        if (view == 0) driver_no_change(initial.driver, initial.kv)
+        else apply_driver(initial.driver, initial.kv, NewTC({
+          certificate: { signature: QuorumCert(CORRECT) }, view: view
+        }))
+      val input = NewQC(EPOCH_BOUNDARY_QC)
+      val waiting = apply_driver(started.driver, started.kv, input)
+      val fetched = serve_requests({ requested: Set(SYNC_BLOCK_3.hash) }, waiting.kv, SYNC_SOURCE)
+      val processed = fetched.inputs.foldl(waiting, (acc, event) => apply_driver(acc.driver, acc.kv, event))
+      val resumed = apply_driver(processed.driver, processed.kv, input)
+      all {
+        waiting.driver.pacemaker.cur_view == view,
+        waiting.driver.pacemaker.high_qc == GENESIS_QC,
+        waiting.driver.consensus.exec_height == 0,
+        waiting.sync == [SYNC_BLOCK_3.hash],
+        waiting.driver.orphans.get(SYNC_BLOCK_3.hash) == [input],
+        fetched.inputs == [BlockSynced(SYNC_BLOCK_1), BlockSynced(SYNC_BLOCK_2), BlockSynced(SYNC_BLOCK_3)],
+        processed.driver.pacemaker.cur_view == (if (view == 0) 3 else view),
+        processed.driver.pacemaker.high_qc == SYNC_QC_2,
+        processed.driver.consensus.exec_hash == SYNC_BLOCK_1.hash,
+        processed.kv.committed_branch == [SYNC_BLOCK_1],
+        processed.out == [Replay(input)],
+        processed.driver.orphans.keys() == Set(),
+        resumed.driver.pacemaker.cur_view == (if (view == 0) 4 else view),
+        resumed.driver.pacemaker.high_qc == EPOCH_BOUNDARY_QC,
+        resumed.kv.committed_branch == [SYNC_BLOCK_1],
+        apply_driver(resumed.driver, resumed.kv, input) == driver_no_change(resumed.driver, resumed.kv),
+      })
+
+  run statusWaitsForBlockTest =
+    val initial = init_node(0)
+    val started = apply_driver(initial.driver, initial.kv, NewTC({
+      certificate: { signature: QuorumCert(CORRECT) }, view: 4
+    }))
+    val input = NewStatus({ sender: 2, qc: SYNC_QC_2, view: 4 })
+    val waiting = apply_driver(started.driver, started.kv, input)
+    val fetched = serve_requests({ requested: Set(SYNC_BLOCK_2.hash) }, waiting.kv, SYNC_SOURCE)
+    val processed = fetched.inputs.foldl(waiting, (acc, event) => apply_driver(acc.driver, acc.kv, event))
+    val resumed = apply_driver(processed.driver, processed.kv, input)
+    all {
+      waiting.driver.pacemaker.cur_view == 4,
+      waiting.driver.pacemaker.high_qc == GENESIS_QC,
+      waiting.sync == [SYNC_BLOCK_2.hash],
+      waiting.driver.orphans.get(SYNC_BLOCK_2.hash) == [input],
+      processed.out == [Replay(input)],
+      processed.driver.orphans.keys() == Set(),
+      resumed.driver.pacemaker.cur_view == 4,
+      resumed.driver.pacemaker.high_qc == SYNC_QC_2,
+      resumed.kv.block_by_hash.get(SYNC_BLOCK_2.hash) == SYNC_BLOCK_2,
+    }
+
+  // The new QC can certify another branch rooted at an already processed ancestor.
+  run qcOnAnotherBranchUsesStoredAncestorTest =
+    val initial = init_node(1)
+    val first = apply_driver(initial.driver, initial.kv, BlockSynced(SYNC_BLOCK_1))
+    val second = apply_driver(first.driver, first.kv, BlockSynced(SYNC_BLOCK_2))
+    val known = apply_driver(second.driver, second.kv, NewQC(SYNC_QC_2))
+    val fork = create_leaf(block_variant_hash(3, 3, 1), SYNC_BLOCK_1.hash, SYNC_QC_1, 2)
+    val qc = EPOCH_BOUNDARY_QC.with("block", fork.hash)
+    val waiting = apply_driver(known.driver, known.kv, NewQC(qc))
+    val fetched = serve_requests({ requested: Set(fork.hash) }, waiting.kv, SYNC_SOURCE.put(fork.hash, fork))
+    val processed = apply_driver(waiting.driver, waiting.kv, BlockSynced(fork))
+    val resumed = apply_driver(processed.driver, processed.kv, NewQC(qc))
+    all {
+      waiting.driver.pacemaker.high_qc == SYNC_QC_2,
+      waiting.sync == [fork.hash],
+      fetched.inputs == [BlockSynced(fork)],
+      processed.out == [Replay(NewQC(qc))],
+      resumed.driver.pacemaker.high_qc == qc,
+      resumed.driver.pacemaker.cur_view == 4,
+      resumed.kv.block_by_hash.keys().contains(SYNC_BLOCK_2.hash),
+      resumed.kv.block_by_hash.keys().contains(fork.hash),
+    }
+
+  // A proposal can supply a block while the QC is waiting for blocksync.
+  run proposalReleasesBufferedQcTest =
+    val initial = init_node(3)
+    val started = apply_driver(initial.driver, initial.kv, ViewTimerFired(0))
+    val input = NewQC(SYNC_QC_1)
+    val waiting = apply_driver(started.driver, started.kv, input)
+    val received = apply_driver(waiting.driver, waiting.kv, NewProposal({
+      sender: 1, proposal: { block: SYNC_BLOCK_1, view: 1 }
+    }))
+    val resumed = apply_driver(received.driver, received.kv, input)
+    all {
+      waiting.sync == [SYNC_BLOCK_1.hash],
+      received.driver.consensus.voted_view == 1,
+      received.kv.block_by_hash.get(SYNC_BLOCK_1.hash) == SYNC_BLOCK_1,
+      received.driver.orphans.keys() == Set(),
+      received.out == [Replay(input)],
+      resumed.driver.pacemaker.cur_view == 2,
+      resumed.driver.pacemaker.high_qc == SYNC_QC_1,
+    }
+
+  run invalidInputsDoNotRequestBlocksTest =
+    val initial = init_node(0)
+    val invalid = SYNC_QC_1.with("certificate", { signature: InvalidCert })
+    Set(
+      NewQC(invalid),
+      NewStatus({ sender: 1, qc: invalid, view: 4 }),
+      NewStatus({ sender: 1, qc: SYNC_QC_1, view: 3 }),
+      NewProposal({ sender: 0, proposal: { block: SYNC_BLOCK_2, view: 2 } }),
+      NewProposal({ sender: 2, proposal: { block: SYNC_BLOCK_2.with("justify", invalid), view: 2 } }),
+      NewProposal({ sender: 2, proposal: { block: SYNC_BLOCK_2.with("parent", 999), view: 2 } }),
+      BlockSynced(SYNC_BLOCK_2),
+      BlockSynced(SYNC_BLOCK_1.with("height", 2))
+    ).forall(input => apply_driver(initial.driver, initial.kv, input) == driver_no_change(initial.driver, initial.kv))
+
   run orphanProposalVotesAfterSyncTest =
     val h1 = block_hash(1, 1)
     val h2 = block_hash(2, 2)
@@ -261,7 +390,8 @@ module scenariosTest {
       .expect(leader_finished(2))
       .then(inject(3, { sender: 2, msg: ProposalMsg(proposal(2, 0, 2, high_qc_of(2))) }))
       .then(2.reps(_ => checked_step(3)))
-      .expect(view_of(3) == 2)
+      .expect(view_of(3) == 1)
+      .expect(high_qc_of(3) == GENESIS_QC)
       .expect(voted_of(3) == 0)
       .expect(not(stored(3, h1)))
       .expect(not(stored(3, h2)))
@@ -270,7 +400,10 @@ module scenariosTest {
       .then(sync_step(3))
       .then(checked_step(3))
       .expect(stored(3, h1))
+      .expect(view_of(3) == 1)
+      .then(checked_step(3))
       .expect(stored(3, h2))
+      .expect(view_of(3) == 2)
       .expect(voted_of(3) == 2)
       .expect(nodes.get(3).driver.orphans.keys() == Set())
 
@@ -283,8 +416,11 @@ module scenariosTest {
       .then(inject(2, vote_packet(1, 1, h1)))
       .then(inject(2, vote_packet(3, 1, h1)))
       .then(4.reps(_ => checked_step(2)))
-      .expect(view_of(2) == 2)
-      .expect(high_qc_of(2).view == 1)
+      .expect(nodes.get(2).driver.orphans.get(h1) == [NewQC({
+        certificate: { signature: QuorumCert(Set(0, 1, 3)) }, block: h1, view: 1
+      })])
+      .expect(view_of(2) == 1)
+      .expect(high_qc_of(2) == GENESIS_QC)
       .expect(not(stored(2, h1)))
       .expect(not(leader_finished(2)))
       .expect(has_sync_requests(2))
@@ -292,6 +428,10 @@ module scenariosTest {
       .then(sync_step(2))
       .then(checked_step(2))
       .expect(stored(2, h1))
+      .expect(not(leader_finished(2)))
+      .then(checked_step(2))
+      .expect(view_of(2) == 2)
+      .expect(high_qc_of(2).view == 1)
       .expect(leader_finished(2))
       .expect(nodes.get(2).driver.orphans.keys() == Set())
       .expect(net.inbox.get(3).select(p => p.msg == ProposalMsg(proposal(2, 0, 2, high_qc_of(2)))).length() == 1)
