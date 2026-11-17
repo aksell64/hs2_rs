@@ -1,5 +1,5 @@
 use crate::network::message::Envelope;
-use crate::protocol::driver::{Driver, DriverInput, DriverOutput};
+use crate::protocol::driver::{Driver, DriverInput};
 use crate::protocol::leaders::LeaderPolicy;
 use crate::protocol::timeouts::TimeoutPolicy;
 use crate::storage::staged::StagedStorage;
@@ -179,10 +179,8 @@ impl<
 
         self.process_committed_blocks(&result.committed);
 
-        for out in result.out {
-            match out {
-                DriverOutput::Replay(replay) => self.queue.push_front(replay),
-            }
+        for input in result.replay {
+            self.queue.push_front(input);
         }
 
         Ok(Some(Effects {

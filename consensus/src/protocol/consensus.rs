@@ -1,4 +1,3 @@
-use crate::protocol::consensus::ConsensusOutput::ProposalDeferred;
 use crate::storage::{KVError, ReadStorage, ReadWriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command, Proposal};
@@ -19,17 +18,10 @@ pub enum ConsensusInput<S: Scheme, C: Command> {
 }
 
 pub enum ConsensusOutput<S: Scheme, C: Command> {
-    ConfirmVote {
-        vote: Vote<S>,
-        block: Block<S, C>,
-    },
+    ConfirmVote { vote: Vote<S>, block: Block<S, C> },
     RejectVote(Block<S, C>),
     Commit(Vec<Block<S, C>>),
     Propose(Proposal<S, C>),
-    ProposalDeferred {
-        missing: S::Digest,
-        request: ProposeRequest<C>,
-    },
 }
 
 pub struct Consensus<S: Scheme> {
@@ -84,7 +76,7 @@ impl<S: Scheme> Consensus<S> {
         }))
     }
 
-    fn extends_justify<C: Command, DB: ReadStorage<S, C>>(
+    pub(crate) fn extends_justify<C: Command, DB: ReadStorage<S, C>>(
         storage: &DB,
         block: &Block<S, C>,
     ) -> Result<bool, KVError> {
@@ -168,12 +160,11 @@ impl<S: Scheme> Consensus<S> {
         if request.view != cur_view || request.view <= storage.get_proposed_view()? {
             return Ok(None);
         }
-        let Some(parent) = storage.get_block_by_hash(&high_qc.block())? else {
-            return Ok(Some(ProposalDeferred {
-                missing: high_qc.block(),
-                request,
-            }));
-        };
+        let parent = storage
+            .get_block_by_hash(&high_qc.block())?
+            .ok_or_else(|| KVError::Missing {
+                key: high_qc.block().as_ref().to_vec(),
+            })?;
         let justify = high_qc.clone();
         let height = parent.height + 1;
         let hash = self

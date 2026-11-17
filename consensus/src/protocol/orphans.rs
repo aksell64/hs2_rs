@@ -1,21 +1,10 @@
-use crate::protocol::consensus::ProposeRequest;
-use crate::types::View;
-use crate::types::block::{Command, Proposal};
+use crate::protocol::driver::DriverInput;
+use crate::types::block::Command;
 use hotstuff_crypto::sign::Scheme;
-use hotstuff_types::node::NodeID;
 use std::collections::HashMap;
 
-pub enum Deferred<S: Scheme, C: Command> {
-    Propose(ProposeRequest<C>),
-    ReceiveProposal {
-        sender: NodeID,
-        proposal: Proposal<S, C>,
-    },
-}
-
 pub struct Orphans<S: Scheme, C: Command> {
-    // missing -> deferred
-    missing: HashMap<S::Digest, Vec<Deferred<S, C>>>,
+    missing: HashMap<S::Digest, Vec<DriverInput<S, C>>>,
 }
 
 impl<S: Scheme, C: Command> Orphans<S, C> {
@@ -25,11 +14,11 @@ impl<S: Scheme, C: Command> Orphans<S, C> {
         }
     }
 
-    pub fn add_deferred(&mut self, missing: S::Digest, deferred: Deferred<S, C>) {
-        self.missing.entry(missing).or_default().push(deferred);
+    pub fn buffer_input(&mut self, missing: S::Digest, input: DriverInput<S, C>) {
+        self.missing.entry(missing).or_default().push(input);
     }
 
-    pub fn pop_deferred(&mut self, digest: &S::Digest) -> Vec<Deferred<S, C>> {
+    pub fn take_inputs(&mut self, digest: &S::Digest) -> Vec<DriverInput<S, C>> {
         self.missing.remove(digest).unwrap_or_default()
     }
 }
