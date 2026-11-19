@@ -69,7 +69,7 @@ type TaskApply<S, C> = Result<Option<TaskOut<S, C>>, KVError>;
 struct TasksStack<S: Scheme, C: Command>(Vec<Task<S, C>>);
 
 impl<S: Scheme, C: Command> TasksStack<S, C> {
-    fn new() -> Self {
+    fn empty() -> Self {
         Self(Vec::new())
     }
 
@@ -169,6 +169,81 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
         Ok(tasks)
     }
 
+    fn process_input<DB: ReadWriteStorage<S, C>>(
+        &mut self,
+        storage: &mut DB,
+        task: Task<S, C>,
+        result: &mut DriverResult<S, C, CS::Clock>,
+    ) -> TaskApply<S, C> {
+        match task {
+            Task::Pacemaker(input) => self.call_pacemaker(storage, input, result),
+            Task::Consensus(input) => self.call_consensus(storage, input),
+            Task::Collector(input) => Ok(Some(TaskOut::Collector(self.collector.apply(input)))),
+            Task::StoreBlock(block) => {
+                storage.insert_block(&block)?;
+                Ok(None)
+            }
+            Task::Commit(blocks) => Self::commit_blocks(storage, blocks, result),
+            Task::ProposalOrBuffer { sender, proposal } => {
+                self.call_proposal_or_buffer(storage, sender, proposal)
+            }
+            Task::Send(envelope) => {
+                result.net.push(envelope);
+                Ok(None)
+            }
+        }
+    }
+
+    fn process_out<M: Mempool<C>>(
+        &mut self,
+        mempool: &mut M,
+        output: TaskOut<S, C>,
+        result: &mut DriverResult<S, C, CS::Clock>,
+    ) -> TasksStack<S, C> {
+        match output {
+            TaskOut::Pacemaker(PacemakerOutput::ProposeNow(view)) => {
+                let request = Self::propose_request(mempool, view);
+                TasksStack::from_vec(vec![Task::Consensus(ConsensusInput::MakeProposal(request))])
+            }
+            TaskOut::Pacemaker(PacemakerOutput::NoPacemakerOutput) => TasksStack::empty(),
+            TaskOut::Consensus(ConsensusOutput::ConfirmVote { vote, block }) => {
+                self.on_confirm_vote(vote, block, result)
+            }
+            TaskOut::Consensus(ConsensusOutput::RejectVote(block)) => {
+                let hash = block.hash;
+                result.replay.extend(self.orphans.take_inputs(&hash));
+                TasksStack::from_vec(vec![
+                    Task::Consensus(ConsensusInput::Update(block.clone())),
+                    Task::StoreBlock(block),
+                ])
+            }
+            TaskOut::Consensus(ConsensusOutput::Commit(blocks)) => {
+                TasksStack::from_vec(vec![Task::Commit(blocks)])
+            }
+            TaskOut::Consensus(ConsensusOutput::Propose(proposal)) => {
+                TasksStack::from_vec(vec![Task::Send(Envelope {
+                    to: Recipient::All,
+                    msg: Message::ProposalMsg(proposal),
+                })])
+            }
+            TaskOut::Collector(CollectorOutput::GenericOutput(GenericCollectorOutput::Ready(
+                qc,
+            ))) => {
+                result.replay.push(DriverInput::NewQC(qc));
+                TasksStack::empty()
+            }
+            TaskOut::Collector(CollectorOutput::GenericOutput(
+                GenericCollectorOutput::AlreadyReady(_) | GenericCollectorOutput::NotReady,
+            )) => TasksStack::empty(),
+            TaskOut::Collector(CollectorOutput::TimeoutOutput(TimeoutCollectorOutput::Ready(
+                tc,
+            ))) => TasksStack::from_vec(vec![Task::Pacemaker(PacemakerInput::ReceivedTC(tc))]),
+            TaskOut::Collector(CollectorOutput::TimeoutOutput(
+                TimeoutCollectorOutput::AlreadyReady(_) | TimeoutCollectorOutput::NotReady,
+            )) => TasksStack::empty(),
+        }
+    }
+
     fn tasks_from_synced_block<DB: ReadStorage<S, C>>(
         &mut self,
         storage: &DB,
@@ -179,7 +254,7 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
             || !self.notary.verify_qc(&block.justify)
             || !Consensus::extends_justify(storage, &block)?
         {
-            return Ok(TasksStack::new());
+            return Ok(TasksStack::empty());
         }
 
         let justify = block.justify.clone();
@@ -204,13 +279,13 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
             || !self.notary.verify_qc(&proposal.block.justify)
             || proposal.block.parent != proposal.block.justify.block()
         {
-            return Ok(TasksStack::new());
+            return Ok(TasksStack::empty());
         }
         if let Some(missing) = Self::check_missing_parent(storage, &proposal.block)? {
             self.orphans
                 .buffer_input(missing, DriverInput::NewProposal { sender, proposal });
             result.sync.push(missing);
-            return Ok(TasksStack::new());
+            return Ok(TasksStack::empty());
         }
         let justify = proposal.block.justify.clone();
         Ok(TasksStack::from_vec(vec![
@@ -226,14 +301,14 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
         result: &mut DriverResult<S, C, CS::Clock>,
     ) -> Result<TasksStack<S, C>, KVError> {
         if !self.pacemaker.is_leader(status.view) || !self.notary.verify_qc(&status.qc) {
-            return Ok(TasksStack::new());
+            return Ok(TasksStack::empty());
         }
         let hash = status.qc.block();
         if storage.get_block_by_hash(&hash)?.is_none() {
             self.orphans
                 .buffer_input(hash, DriverInput::NewStatus(status));
             result.sync.push(hash);
-            return Ok(TasksStack::new());
+            return Ok(TasksStack::empty());
         }
         Ok(TasksStack::from_vec(vec![Task::Pacemaker(
             PacemakerInput::ReceivedStatus(status),
@@ -247,13 +322,13 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
         result: &mut DriverResult<S, C, CS::Clock>,
     ) -> Result<TasksStack<S, C>, KVError> {
         if !self.notary.verify_qc(&qc) {
-            return Ok(TasksStack::new());
+            return Ok(TasksStack::empty());
         }
         let hash = qc.block();
         if storage.get_block_by_hash(&hash)?.is_none() {
             self.orphans.buffer_input(hash, DriverInput::NewQC(qc));
             result.sync.push(hash);
-            return Ok(TasksStack::new());
+            return Ok(TasksStack::empty());
         }
         Ok(TasksStack::from_vec(vec![Task::Pacemaker(
             PacemakerInput::ReceivedQC(qc),
@@ -262,51 +337,26 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
 
     fn tasks_from_new_vote(&self, signed_vote: SignedVote<S>) -> TasksStack<S, C> {
         if !self.pacemaker.is_leader(signed_vote.view() + 1) {
-            return TasksStack::new();
+            return TasksStack::empty();
         }
 
         if !self.notary.verify_partial(&signed_vote) {
-            return TasksStack::new();
+            return TasksStack::empty();
         }
         TasksStack::from_vec(vec![Task::Collector(GenericVoteInput(signed_vote))])
     }
 
     fn tasks_from_new_wish(&self, signed_wish: SignedWish<S>) -> TasksStack<S, C> {
         if !self.pacemaker.is_epoch_leader(signed_wish.view()) {
-            return TasksStack::new();
+            return TasksStack::empty();
         }
 
         if !self.notary.verify_partial(&signed_wish) {
-            return TasksStack::new();
+            return TasksStack::empty();
         }
         TasksStack::from_vec(vec![Task::Collector(CollectorInput::WishInput(
             signed_wish,
         ))])
-    }
-
-    fn process_input<DB: ReadWriteStorage<S, C>>(
-        &mut self,
-        storage: &mut DB,
-        task: Task<S, C>,
-        result: &mut DriverResult<S, C, CS::Clock>,
-    ) -> TaskApply<S, C> {
-        match task {
-            Task::Pacemaker(input) => self.call_pacemaker(storage, input, result),
-            Task::Consensus(input) => self.call_consensus(storage, input),
-            Task::Collector(input) => Ok(Some(TaskOut::Collector(self.collector.apply(input)))),
-            Task::StoreBlock(block) => {
-                storage.insert_block(&block)?;
-                Ok(None)
-            }
-            Task::Commit(blocks) => Self::commit_blocks(storage, blocks, result),
-            Task::ProposalOrBuffer { sender, proposal } => {
-                self.call_proposal_or_buffer(storage, sender, proposal)
-            }
-            Task::Send(envelope) => {
-                result.net.push(envelope);
-                Ok(None)
-            }
-        }
     }
 
     fn call_pacemaker<DB: ReadWriteStorage<S, C>>(
@@ -385,19 +435,6 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
         Ok(None)
     }
 
-    fn process_out<M: Mempool<C>>(
-        &mut self,
-        mempool: &mut M,
-        output: TaskOut<S, C>,
-        result: &mut DriverResult<S, C, CS::Clock>,
-    ) -> TasksStack<S, C> {
-        match output {
-            TaskOut::Pacemaker(out) => self.process_pacemaker_out(mempool, out, result),
-            TaskOut::Consensus(out) => self.process_consensus_out(out, result),
-            TaskOut::Collector(out) => self.process_collector_out(out, result),
-        }
-    }
-
     fn release_pending(&mut self, view: View, result: &mut DriverResult<S, C, CS::Clock>) {
         let released = self.pending.remove(&view).unwrap_or_default();
         result.replay.extend(
@@ -405,48 +442,6 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
                 .into_iter()
                 .map(|(sender, proposal)| DriverInput::NewProposal { sender, proposal }),
         );
-    }
-
-    fn process_pacemaker_out<M: Mempool<C>>(
-        &mut self,
-        mempool: &mut M,
-        pacemaker_out: PacemakerOutput,
-        _: &mut DriverResult<S, C, CS::Clock>,
-    ) -> TasksStack<S, C> {
-        match pacemaker_out {
-            PacemakerOutput::ProposeNow(view) => {
-                let request = Self::propose_request(mempool, view);
-                TasksStack::from_vec(vec![Task::Consensus(ConsensusInput::MakeProposal(request))])
-            }
-            PacemakerOutput::NoPacemakerOutput => TasksStack::new(),
-        }
-    }
-
-    fn process_consensus_out(
-        &mut self,
-        consensus_out: ConsensusOutput<S, C>,
-        result: &mut DriverResult<S, C, CS::Clock>,
-    ) -> TasksStack<S, C> {
-        match consensus_out {
-            ConsensusOutput::ConfirmVote { vote, block } => {
-                self.on_confirm_vote(vote, block, result)
-            }
-            ConsensusOutput::RejectVote(block) => {
-                let hash = block.hash;
-                result.replay.extend(self.orphans.take_inputs(&hash));
-                TasksStack::from_vec(vec![
-                    Task::Consensus(ConsensusInput::Update(block.clone())),
-                    Task::StoreBlock(block),
-                ])
-            }
-            ConsensusOutput::Commit(blocks) => TasksStack::from_vec(vec![Task::Commit(blocks)]),
-            ConsensusOutput::Propose(proposal) => {
-                TasksStack::from_vec(vec![Task::Send(Envelope {
-                    to: Recipient::All,
-                    msg: Message::ProposalMsg(proposal),
-                })])
-            }
-        }
     }
 
     fn on_confirm_vote(
@@ -470,28 +465,6 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
         ]);
         result.replay.extend(self.orphans.take_inputs(&hash));
         TasksStack::from_vec(tasks)
-    }
-
-    fn process_collector_out(
-        &mut self,
-        collector_out: CollectorOutput<S>,
-        result: &mut DriverResult<S, C, CS::Clock>,
-    ) -> TasksStack<S, C> {
-        match collector_out {
-            CollectorOutput::GenericOutput(GenericCollectorOutput::Ready(qc)) => {
-                result.replay.push(DriverInput::NewQC(qc));
-                TasksStack::new()
-            }
-            CollectorOutput::GenericOutput(
-                GenericCollectorOutput::AlreadyReady(_) | GenericCollectorOutput::NotReady,
-            ) => TasksStack::new(),
-            CollectorOutput::TimeoutOutput(TimeoutCollectorOutput::Ready(tc)) => {
-                TasksStack::from_vec(vec![Task::Pacemaker(PacemakerInput::ReceivedTC(tc))])
-            }
-            CollectorOutput::TimeoutOutput(
-                TimeoutCollectorOutput::AlreadyReady(_) | TimeoutCollectorOutput::NotReady,
-            ) => TasksStack::new(),
-        }
     }
 
     fn propose_request<M: Mempool<C>>(mempool: &mut M, view: View) -> ProposeRequest<C> {
