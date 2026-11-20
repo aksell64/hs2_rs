@@ -143,7 +143,8 @@ module main {
       })
 
   action deliver_faulty(id: NodeID): bool = {
-    val packets = faulty_votes.union(faulty_proposals(all_qcs, all_blocks(nodes)))
+    val qc_packets = tuples(FAULTY, all_qcs).map(t => { sender: t._1, msg: QCMsg(t._2) })
+    val packets = faulty_votes.union(faulty_proposals(all_qcs, all_blocks(nodes))).union(qc_packets)
     nondet packet = packets.oneOf()
     all {
       nodes' = nodes.put(id, push_to_queue(nodes.get(id), packet_to_input(packet))),
@@ -217,7 +218,7 @@ module main {
       not(has_messages(id)),
       // The leader of v has done its part: it proposed in v or already left v. Proposing and
       // sending happen in one step, so a proposal of a correct leader is by now in this
-      // node's inbox, queue, pending buffer or already processed. A faulty leader counts as
+      // node's inbox, queue, keeper or already processed. A faulty leader counts as
       // done: correct nodes must be able to time out on it.
       leader_finished(next_view_timer(node.view_timers)),
     }
@@ -269,6 +270,8 @@ module main {
 
   val ancestry_inv = certified_extends_justify(qc_views, all_blocks(nodes))
 
+  val block_dependencies_inv = CORRECT.forall(id => block_dependencies_ready(nodes.get(id)))
+
   val safety_inv = and {
     agreement_inv,
     lock_monotonic_inv,
@@ -278,9 +281,20 @@ module main {
     once_qc_in_view_inv,
     lock_protection_inv,
     ancestry_inv,
+    block_dependencies_inv,
   }
 
   val no_commit_witness = CORRECT.forall(id => nodes.get(id).kv.committed_branch.length() == 0)
+
+  val blocksync_requested_witness = CORRECT.exists(id => has_sync_requests(id))
+
+  val epoch_qc_relay_witness =
+    net.inbox.keys().exists(id => net.inbox.get(id).indices().exists(index =>
+      val packet = net.inbox.get(id)[index]
+      CORRECT.contains(packet.sender) and match packet.msg {
+        | QCMsg(qc) => (qc.view + 1) % epoch_length == 0
+        | _ => false
+      }))
 
   // Tail-forking: the block certified in view v is dropped by the certified block of view v + 1.
   val tail_fork_witness =

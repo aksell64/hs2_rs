@@ -1,4 +1,5 @@
 /target
+.codex/
 .idea/
 trace.itf.json
 analisys.md

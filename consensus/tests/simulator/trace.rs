@@ -281,5 +281,6 @@ pub fn describe(msg: &Message<TestScheme, TestCommand>) -> String {
         Message::WishMsg(wish) => format!("Wish(v{})", wish.view()),
         Message::StatusMsg { view, .. } => format!("Status(v{view})"),
         Message::TCMsg(tc) => format!("TC(v{})", tc.view()),
+        Message::QCMsg(qc) => format!("QC(v{})", qc.view()),
     }
 }

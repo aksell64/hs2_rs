@@ -101,6 +101,7 @@ enum SpecMessage {
     WishMsg(View),
     StatusMsg { qc: SpecQC, view: View },
     TCMsg { certificate: SpecCert, view: View },
+    QCMsg(SpecQC),
 }
 
 impl State<World> for Spec {
@@ -186,6 +187,7 @@ fn project_packet(world: &World, sender: NodeID, bytes: &[u8]) -> Result<SpecPac
             certificate: project_cert(&tc),
             view: tc.view(),
         },
+        Message::QCMsg(qc) => SpecMessage::QCMsg(project_qc(world, &qc)?),
     };
     Ok(SpecPacket { sender: u32::from(sender), msg })
 }

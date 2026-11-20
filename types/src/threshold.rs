@@ -23,7 +23,7 @@ pub struct Quorum;
 
 impl Threshold for Quorum {
     fn required(n: u32) -> u32 {
-        (n - faulty(n)).max(1)
+        (n - f(n)).max(1)
     }
 }
 
@@ -36,12 +36,12 @@ pub struct OneHonest;
 
 impl Threshold for OneHonest {
     fn required(n: u32) -> u32 {
-        faulty(n) + 1
+        f(n) + 1
     }
 }
 
 /// Faulty nodes a committee of `n` tolerates: `f = (n - 1) / 3`.
-fn faulty(n: u32) -> u32 {
+fn f(n: u32) -> u32 {
     n.saturating_sub(1) / 3
 }
 

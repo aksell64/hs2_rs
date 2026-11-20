@@ -18,7 +18,6 @@ module consensus {
   | RejectVote(Block)
   | Commit(List[Block])
   | Propose(Proposal)
-  | ProposalDeferred({ missing: Hash, request: ProposeRequest })
 
   type Consensus = {
     qc_lock: CertifiedBlock,
@@ -129,13 +128,11 @@ module consensus {
     if (request.view != cur_view or request.view <= c.proposed_view)
       no_change(c)
     else
-      match get_block_by_hash(kv, high_qc.block) {
-        | None => { consensus: c, out: ProposalDeferred({ missing: high_qc.block, request: request }) }
-        | Some(parent) =>
-          val block = create_leaf(request.hash, parent.hash, high_qc, parent.height + 1)
-          {
-            consensus: c.with("proposed_view", request.view),
-            out: Propose({ block: block, view: request.view }),
-          }
+      // The driver adopts high_qc only after its block and ancestors are processed.
+      val parent = kv.block_by_hash.get(high_qc.block)
+      val block = create_leaf(request.hash, parent.hash, high_qc, parent.height + 1)
+      {
+        consensus: c.with("proposed_view", request.view),
+        out: Propose({ block: block, view: request.view }),
       }
 }

@@ -1,5 +1,5 @@
 use super::adversary::*;
-use super::byzantine::tail_fork;
+use super::byzantine::{conflicting_proposal, reveal_qc_to_one, tail_fork};
 use super::dsl::*;
 use super::invariants::*;
 use super::rng::SharedRng;
@@ -8,7 +8,9 @@ use super::simulator::no_effects;
 use anyhow::{Context as _, Result, ensure};
 use hotstuff_consensus::protocol::leaders::{LeaderPolicy, RoundRobin};
 use hotstuff_types::node::NodeID;
+use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 const DELTA: u64 = 10;
 const VIEW_TIMEOUT: u64 = 100;
@@ -16,6 +18,105 @@ const LOCK_TIMEOUT: u64 = 30;
 const VERBOSE: bool = false;
 
 const N4: u32 = 4;
+const N7: u32 = 7;
+
+#[test]
+fn epoch_boundary_waits_for_tc_test() -> Result<()> {
+    let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT).build()?;
+    let env = || {
+        // Keep QC formation out of this scenario so every view ends by its timer.
+        let delivery = |_: &Ctx, packet: &Packet| match packet.kind() {
+            Kind::Proposal | Kind::Vote => Fate::Drop,
+            _ => Fate::Delay(DELTA),
+        };
+        Env::new()
+            .adversary(Adversary::new().delivery(delivery))
+            .invariant(safety())
+    };
+    let mut runner = Runner::new(setup);
+
+    runner.run(env().stop_cond(time_reached(VIEW_TIMEOUT)))?;
+    ensure!(
+        min_view(runner.state()) == 1 && max_view(runner.state()) == 1,
+        "view 1 occupies the second slot of the initial epoch"
+    );
+
+    runner.run(env().stop_cond(time_reached(2 * VIEW_TIMEOUT)))?;
+    ensure!(
+        min_view(runner.state()) == 2 && max_view(runner.state()) == 2,
+        "the timeout of view 1 must advance directly to view 2"
+    );
+
+    runner.run(env().stop_cond(time_reached(3 * VIEW_TIMEOUT)))?;
+    ensure!(
+        min_view(runner.state()) == 3 && max_view(runner.state()) == 3,
+        "the timeout of view 2 must advance directly to view 3"
+    );
+
+    runner.run(env().stop_cond(time_reached(4 * VIEW_TIMEOUT)))?;
+    ensure!(
+        min_view(runner.state()) == 3 && max_view(runner.state()) == 3,
+        "nodes must wait in view 3 for TC(4)"
+    );
+
+    runner.run(
+        env()
+            .stop_cond(|state| min_view(state) >= 4)
+            .deadline(4 * VIEW_TIMEOUT + 2 * DELTA),
+    )?;
+    ensure!(max_view(runner.state()) == 4, "TC(4) must enter view 4");
+    Ok(())
+}
+
+#[test]
+fn epoch_qc_relay_synchronizes_honest_nodes_test() -> Result<()> {
+    for_each_seed(&random_seeds(100), epoch_qc_relay_synchronizes_honest_nodes)
+}
+
+fn epoch_qc_relay_synchronizes_honest_nodes(seed: u64, verbose: bool) -> Result<()> {
+    let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT)
+        .rng(SharedRng::new(seed))
+        .byzantine([0])
+        .verbose(verbose)
+        .build()?;
+    let adversary =
+        Adversary::new().byzantine(0, |_: &State| true, reveal_qc_to_one(4, NodeID::from(1)));
+    let mut runner = Runner::new(setup);
+    runner.run(
+        Env::new()
+            .adversary(adversary)
+            .invariant(safety())
+            .invariant(no_view_timeouts())
+            .stop_cond(|state| max_view(state) >= 4)
+            .deadline(7 * DELTA),
+    )?;
+    let first_entered_at = runner.state().now();
+    ensure!(
+        runner.state().honest_views().collect::<Vec<_>>()
+            == vec![
+                (NodeID::from(1), 4),
+                (NodeID::from(2), 3),
+                (NodeID::from(3), 3)
+            ],
+        "the QC must initially reach only n1"
+    );
+
+    // The collector stays silent while honest nodes disseminate QC(3).
+    let silent = Adversary::new().byzantine(0, |_: &State| true, |_, _| Ok(no_effects()));
+    runner.run(
+        Env::new()
+            .adversary(silent)
+            .invariant(safety())
+            .invariant(no_view_timeouts())
+            .stop_cond(|state| min_view(state) >= 4)
+            .deadline(first_entered_at + DELTA),
+    )?;
+    ensure!(
+        max_view(runner.state()) == 4,
+        "all honest nodes must be in view 4"
+    );
+    Ok(())
+}
 
 #[test]
 fn sync_happy_path_test() -> Result<()> {
@@ -210,15 +311,16 @@ fn sync_after_gst_tc_waits_for_isolated_node(seed: u64, verbose: bool) -> Result
         .with_context(at_gst_msg)?;
     runner.mark(runner.state().now(), &format!("all in v{epoch_view}"));
 
-    // wait at most τ + 8Δ for a new commit. In the worst case n0 leads epoch_view and stays silent:
-    // the view timer takes τ, n1 then waits for its lock timer (3Δ), and Proposal, votes, Proposal,
-    // votes, Proposal take 5Δ.
+    // From the last entry, allow τ + 8Δ for a new commit. The silent n0 leads epoch_view,
+    // so n1 enters the next view within τ, waits for its lock timer (3Δ), then Proposal,
+    // votes, Proposal, votes and Proposal take 5Δ.
+    let all_entered_at = runner.state().now();
     let height = max_committed_height(runner.state());
     runner
         .run(
             env_n0_silent()
                 .stop_cond(move |state| min_committed_height(state) > height)
-                .deadline(first_entered_at + view_timeout + lock_timeout + 5 * delta),
+                .deadline(all_entered_at + view_timeout + lock_timeout + 5 * delta),
         )
         .with_context(|| {
             format!("no commits after entering view {epoch_view}: height {height}, gst = {gst}")
@@ -299,15 +401,17 @@ fn sync_after_gst_random_delays_no_byzantine(seed: u64, verbose: bool) -> Result
         )
         .with_context(at_gst_msg)?;
 
-    // From here on votes and the next Proposal take 2Δ, and entering a view commits the block of
-    // two views before, so only the blocks of the last two views stay uncommitted.
+    // From here on votes and the next Proposal take 2Δ. Processing the Proposal commits the
+    // block of two views before. At an epoch boundary a standalone QC can advance the view first.
     for view in epoch_view + 2..=epoch_view + VIEWS_AFTER_ENTRY {
         let entered_at = runner.state().now();
         let height = min_committed_height(runner.state());
         runner
             .run(
                 env()
-                    .stop_cond(move |state| min_view(state) >= view)
+                    .stop_cond(move |state| {
+                        min_view(state) >= view && min_committed_height(state) > height
+                    })
                     .deadline(entered_at + 2 * delta),
             )
             .with_context(at_gst_msg)?;
@@ -351,17 +455,16 @@ fn tail_fork_drops_blocks_of_previous_leader(seed: u64, verbose: bool) -> Result
 
     let adversary = Adversary::new().byzantine(3, |_: &State| true, tail_fork(N4));
     let mut runner = Runner::new(setup);
-    // The first 3Δ are Proposal, votes and Proposal up to the first view of n2. Then in each cycle
-    // others do not enter the view of n3 on its Proposal, because the QC in it is too old, so they
-    // wait for the view timer (τ). By then n0 has the votes of n3 and of n2, whose timer fired Δ
-    // earlier, so its own vote completes the QC at once. Then Proposal, votes, Proposal, votes and
-    // Proposal take 5Δ.
+    // The first 3Δ reach the first view of n2. In each cycle, the stale QC in n3's proposal
+    // makes peers wait for the penultimate view's timer, at most (epoch_length - 1)τ after
+    // epoch entry. Allow another 5Δ for QC collection and the following honest proposals.
+    let cycle_timeout = (RoundRobin::new(N4).epoch_length() - 1) * view_timeout;
     runner.run(
         Env::new()
             .adversary(adversary)
             .invariant(safety())
             .stop_cond(|state| min_view(state) >= LAST_VIEW)
-            .deadline(3 * delta + CYCLES * (view_timeout + 5 * delta)),
+            .deadline(3 * delta + CYCLES * (cycle_timeout + 5 * delta)),
     )?;
 
     // Every view has one block. One block of n2 is dropped per cycle, and the blocks of the last
@@ -386,9 +489,116 @@ fn tail_fork_drops_blocks_of_previous_leader(seed: u64, verbose: bool) -> Result
 }
 
 #[test]
+fn byzantine_leader_conflicting_proposal_is_rejected_test() -> Result<()> {
+    let seeds = random_seeds(1_000);
+    for_each_seed(&seeds, byzantine_leader_conflicting_proposal_is_rejected)
+}
+
+// G -> B(v1) -> C(v2). After collecting QC(C), n3 withholds it and proposes G -> B'
+// in v3. B' has a genuine QC(G), but honest voters for C are already locked on B.
+fn byzantine_leader_conflicting_proposal_is_rejected(seed: u64, verbose: bool) -> Result<()> {
+    const ATTACK_VIEW: u64 = 3;
+    let setup = setup(N4, DELTA, VIEW_TIMEOUT, LOCK_TIMEOUT)
+        .rng(SharedRng::new(seed))
+        .byzantine([3])
+        .verbose(verbose)
+        .build()?;
+    let attack = Rc::new(Cell::new(None));
+    let recorded_attack = Rc::clone(&attack);
+    let adversary = Adversary::new().byzantine(
+        3,
+        |_: &State| true,
+        conflicting_proposal(N4, ATTACK_VIEW, move |protected, fork| {
+            recorded_attack.set(Some((protected, fork)));
+        }),
+    );
+
+    let mut runner = Runner::new(setup);
+    runner.run(
+        Env::new()
+            .adversary(adversary)
+            .invariant(safety())
+            // The stale QC cannot advance peers to v3. Wait for their timers and the replay
+            // of the buffered fork, so rejection cannot be explained by a wrong current view.
+            .stop_cond(|state| min_view(state) >= ATTACK_VIEW)
+            .deadline(3 * VIEW_TIMEOUT),
+    )?;
+    let (protected, fork) = attack
+        .get()
+        .context("n3 never proposed the conflicting block")?;
+    proposal_rejected(ATTACK_VIEW, fork, 2, (1, protected))(runner.state())?;
+    runner.mark(runner.state().now(), "conflicting proposal rejected");
+
+    let silent = Adversary::new().byzantine(3, |_: &State| true, |_, _| Ok(no_effects()));
+    runner.run(
+        Env::new()
+            .adversary(silent)
+            .invariant(safety())
+            .stop_cond(|state| min_committed_height(state) >= 2)
+            .deadline(5 * VIEW_TIMEOUT),
+    )?;
+    for (id, log) in runner.state().honest_commit_logs() {
+        ensure!(
+            log.iter()
+                .any(|commit| commit.height == 1 && commit.hash == protected),
+            "{id:?} did not commit the protected block B"
+        );
+        ensure!(
+            log.iter().all(|commit| commit.hash != fork),
+            "{id:?} committed the conflicting block"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sync_after_gst_tc_waits_for_lagging_nodes_test() -> Result<()> {
+    sync_after_gst_tc_waits_for_lagging_nodes(0, true)
+}
+
+fn sync_after_gst_tc_waits_for_lagging_nodes(seed: u64, verbose: bool) -> Result<()> {
+    let delta = 5;
+    let view_timeout = 20 * delta;
+    let lock_timeout = 3 * delta;
+    let gst = 10 * view_timeout;
+    let end = gst + 10 * view_timeout;
+    let setup = setup(N7, delta, view_timeout, lock_timeout)
+        .rng(SharedRng::new(seed))
+        .byzantine([0, 1])
+        .verbose(verbose)
+        .build()?;
+
+    let lagging = || partition([&[5, 6]], gst, delta);
+    let mut runner = Runner::new(setup);
+    runner.run(
+        Env::new()
+            .adversary(Adversary::new().delivery(lagging()))
+            .invariant(safety())
+            .stop_cond(time_reached(gst)),
+    )?;
+    runner.mark(gst, "GST");
+
+    let leaders = RoundRobin::new(N7);
+    let view_at_gst = max_view(runner.state());
+    let epoch_view = leaders.epoch_start(view_at_gst) + leaders.epoch_length();
+    let silent = || {
+        let adversary = Adversary::new()
+            .delivery(lagging())
+            .byzantine(0, |_: &State| true, |_, _| Ok(no_effects()))
+            .byzantine(1, |_: &State| true, |_, _| Ok(no_effects()));
+        Env::new().adversary(adversary).invariant(safety())
+    };
+    runner.run(silent().stop_cond(move |state| max_view(state) >= epoch_view))?;
+    runner.mark(runner.state().now(), &format!("first in v{epoch_view}"));
+    runner.run(silent().stop_cond(move |state| min_view(state) >= epoch_view))?;
+    runner.mark(runner.state().now(), &format!("all in v{epoch_view}"));
+    runner.run(silent().stop_cond(time_reached(end)))
+}
+
+#[test]
 fn replay_seed() -> Result<()> {
     let seed = 500;
-    tail_fork_drops_blocks_of_previous_leader(500, true)
+    byzantine_leader_conflicting_proposal_is_rejected(500, true)
 }
 
 fn setup(n: u32, delta: u64, view_timeout: u64, lock_timeout: u64) -> Setup {

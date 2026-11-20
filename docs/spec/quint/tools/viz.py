@@ -47,7 +47,7 @@ def node_state(n, sync):
     state = {
         'view': num(pm['cur_view']),
         'leader': num(pm['cur_leader']),
-        'proposed': pm['proposed'],
+        'proposed': num(c['proposed_view']) == num(pm['cur_view']),
         'high_qc': qc(pm['high_qc']),
         'lock': qc(c['qc_lock']),
         'voted_view': num(c['voted_view']),
@@ -58,7 +58,8 @@ def node_state(n, sync):
         'sent_wish': num_set(pm['sent_wish']),
         'statuses': num_set(pm['statuses']),
         'relayed_tc': num_set(pm['relayed_tc']),
-        'pending': {str(num(k)): [fmt(x) for x in v] for k, v in entries(d['pending']) if v},
+        'keeper_by_view': {str(num(k)): [fmt(x) for x in v] for k, v in entries(d['keeper']['by_view']) if v},
+        'keeper_by_block': {str(num(k)): [fmt(x) for x in v] for k, v in entries(d['keeper']['by_block']) if v},
         'votes': fmt(d['collector']['generic_collectors']),
         'wishes': fmt(d['collector']['timeout_collectors']),
         'queue': [fmt(x) for x in n['queue']],

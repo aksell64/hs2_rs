@@ -4,6 +4,8 @@ Event-driven Chained HotStuff-2 (for replica u)
 // pacemaker — всё на views (HotStuff-2, Figures 1–2). Высота блока — только
 // глубина цепи для порядка исполнения; в решениях consensus не участвует.
 // View блока не хранится: в message (предложение) и в QC (сертифицированные).
+// n = 3f + 1 — размер фиксированного комитета, f — верхняя граница числа византийских узлов.
+// Каждая эпоха содержит n view.
 
 // Допущения псевдокода:
 //   - все блоки уже засинканы: родитель и предки любого блока есть в хранилище
@@ -29,7 +31,7 @@ Event-driven Chained HotStuff-2 (for replica u)
 //         старт: у всех узлов сразу срабатывает ViewTimerFired(0) → advanceView(1)
 //
 //   verifyQC(qc)              — qc несёт n−f валидных долей за ⟨qc.node, qc.viewNumber⟩
-//   verifyTC(tc)             — tc несёт 2t+1 валидных wish-долей за tc.view
+//   verifyTC(tc)             — tc несёт 2f+1 валидных wish-долей за tc.view
 //   verifyShare(σ, msg, p)   — σ — валидная доля p за msg
 
 // ───────────────────────── Consensus ─────────────────────────
@@ -92,7 +94,7 @@ upon LockTimerFired(v)                                       // истёк case2
 
 upon ViewTimerFired(v)                                       // слот kτ для view v
     if v ≠ curView then return                               // устаревший таймер
-    if (v + 1) mod (t + 1) ≠ 0 then                          // v не последний в эпохе
+    if (v + 1) mod n ≠ 0 then                                // v не последний в эпохе
         advanceView(v + 1)                                   // локально, без коммуникации
     else                                                     // epoch synchronization
         if ¬sentWish[v + 1] then
@@ -105,12 +107,15 @@ upon NewWish(m = ⟨wish, v', σ⟩ from p)
     if ¬verifyShare(σ, ⟨wish, v'⟩, p) then return            // валидная доля от p
     if ∃⟨p, σ'⟩ ∈ W[v'] then return                          // дедуп по отправителю
     W[v'] ← W[v'] ∪ {⟨p, σ⟩}
-    if |W[v']| ≥ 2t + 1 then
+    if |W[v']| ≥ 2f + 1 then
         tc ← TC(v', {σ | ⟨p, σ⟩ ∈ W[v']})
         processTC(tc)
 
 upon NewTC(tc)
     processTC(tc)
+
+upon NewQC(qc)
+    onReceiveQC(qc)
 
 upon NewStatus(m = statusMsg_v(qc, view))
     if u ≠ getLeader(view) then return
@@ -124,13 +129,16 @@ procedure onReceiveQC(qc)
     if qc.viewNumber > qc_high.viewNumber then               // ранг по view (не по высоте!)
         qc_high ← qc
     if qc.viewNumber ≥ curView then
-        advanceView(qc.viewNumber + 1)                        // Advance по сертификату
+        nextView ← qc.viewNumber + 1
+        if nextView mod n = 0 then                           // вход в первый view эпохи по граничному QC
+            broadcast(msg_u(QC, qc))
+        advanceView(nextView)                                // Advance по сертификату
 
-procedure setTimers(v)                                       // вход в эпоху через ЛЮБОЙ её view
-    e ← v − (v mod (t + 1))                                  // первый view эпохи
-    T ← now                                                  // now = начало слота для view v
-    for k ← (v − e) … t do                                   // пропущенные слоты не ставим
-        schedule ViewTimerFired(e + k) at T + (k − (v − e) + 1)·τ
+procedure setTimers(v)                                       // первый вход в эпоху через любой её view
+    e ← v − (v mod n)                                        // первый view эпохи
+    a ← now                                                  // время первого входа узла в эпоху
+    for w ← v … (e + n − 1) do                              // текущий и следующие view эпохи
+        schedule ViewTimerFired(w) at a + (w − e + 1)·τ
 
 procedure advanceView(v')
     if v' ≤ curView then return
@@ -171,6 +179,6 @@ procedure processTC(tc)
     advanceView(tc.view)
 
 function getLeader(view)                                     // specified by the application
-function epochLeaders(view)                                  // t+1 лидеров эпохи этого view
-function epochOf(view) = view div (t + 1)
+function epochLeaders(view)                                  // n лидеров эпохи этого view
+function epochOf(view) = view div n
 ```

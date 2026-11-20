@@ -400,6 +400,7 @@ impl ViewerTrace {
             Message::ProposalMsg(proposal) => Some(self.block_id(proposal.block.hash)),
             Message::VoteMsg(vote) => Some(self.block_id(vote.block_hash())),
             Message::StatusMsg { qc, .. } => Some(self.block_id(qc.block())),
+            Message::QCMsg(qc) => Some(self.block_id(qc.block())),
             Message::WishMsg(_) | Message::TCMsg(_) => None,
         }
     }
@@ -433,6 +434,9 @@ impl ViewerTrace {
                 )
             }
             Message::TCMsg(tc) => format!("TC(v{})", tc.view()),
+            Message::QCMsg(qc) => {
+                format!("QC(b{}@v{})", self.block_id(qc.block()), qc.view())
+            }
         }
     }
 }
@@ -444,6 +448,7 @@ fn kind(msg: &Message<TestScheme, TestCommand>) -> &'static str {
         Message::WishMsg(_) => "Wish",
         Message::StatusMsg { .. } => "Status",
         Message::TCMsg(_) => "TC",
+        Message::QCMsg(_) => "QC",
     }
 }
 
