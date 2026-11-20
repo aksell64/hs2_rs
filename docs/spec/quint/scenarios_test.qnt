@@ -47,7 +47,7 @@ module scenariosTest {
       .then(step_until_proposed(3, v)).expect(safety_inv)
 
   // Upper bound on rounds for one view on the happy path. The busiest node is the next leader:
-  // it handles the proposal, at most committee_size votes and its EnterView, one event per step,
+  // it handles the proposal, at most committee_size votes and the resulting NewQC, one event per step,
   // and may lag one round behind each sender. Rounds after the stop condition are no-ops,
   // so the bound only has to be large enough.
   pure val MAX_ROUNDS_PER_VIEW = 2 * committee_size + 2
@@ -288,14 +288,14 @@ module scenariosTest {
         waiting.driver.pacemaker.high_qc == GENESIS_QC,
         waiting.driver.consensus.exec_height == 0,
         waiting.sync == [SYNC_BLOCK_3.hash],
-        waiting.driver.orphans.get(SYNC_BLOCK_3.hash) == [input],
+        waiting.driver.keeper.by_block.get(SYNC_BLOCK_3.hash) == [input],
         fetched.inputs == [BlockSynced(SYNC_BLOCK_1), BlockSynced(SYNC_BLOCK_2), BlockSynced(SYNC_BLOCK_3)],
         processed.driver.pacemaker.cur_view == (if (view == 0) 3 else view),
         processed.driver.pacemaker.high_qc == SYNC_QC_2,
         processed.driver.consensus.exec_hash == SYNC_BLOCK_1.hash,
         processed.kv.committed_branch == [SYNC_BLOCK_1],
-        processed.out == [Replay(input)],
-        processed.driver.orphans.keys() == Set(),
+        processed.replay == [input],
+        processed.driver.keeper.by_block.keys() == Set(),
         resumed.driver.pacemaker.cur_view == (if (view == 0) 4 else view),
         resumed.driver.pacemaker.high_qc == EPOCH_BOUNDARY_QC,
         resumed.kv.committed_branch == [SYNC_BLOCK_1],
@@ -316,9 +316,9 @@ module scenariosTest {
       waiting.driver.pacemaker.cur_view == 4,
       waiting.driver.pacemaker.high_qc == GENESIS_QC,
       waiting.sync == [SYNC_BLOCK_2.hash],
-      waiting.driver.orphans.get(SYNC_BLOCK_2.hash) == [input],
-      processed.out == [Replay(input)],
-      processed.driver.orphans.keys() == Set(),
+      waiting.driver.keeper.by_block.get(SYNC_BLOCK_2.hash) == [input],
+      processed.replay == [input],
+      processed.driver.keeper.by_block.keys() == Set(),
       resumed.driver.pacemaker.cur_view == 4,
       resumed.driver.pacemaker.high_qc == SYNC_QC_2,
       resumed.kv.block_by_hash.get(SYNC_BLOCK_2.hash) == SYNC_BLOCK_2,
@@ -340,7 +340,7 @@ module scenariosTest {
       waiting.driver.pacemaker.high_qc == SYNC_QC_2,
       waiting.sync == [fork.hash],
       fetched.inputs == [BlockSynced(fork)],
-      processed.out == [Replay(NewQC(qc))],
+      processed.replay == [NewQC(qc)],
       resumed.driver.pacemaker.high_qc == qc,
       resumed.driver.pacemaker.cur_view == 4,
       resumed.kv.block_by_hash.keys().contains(SYNC_BLOCK_2.hash),
@@ -361,8 +361,8 @@ module scenariosTest {
       waiting.sync == [SYNC_BLOCK_1.hash],
       received.driver.consensus.voted_view == 1,
       received.kv.block_by_hash.get(SYNC_BLOCK_1.hash) == SYNC_BLOCK_1,
-      received.driver.orphans.keys() == Set(),
-      received.out == [Replay(input)],
+      received.driver.keeper.by_block.keys() == Set(),
+      received.replay == [input],
       resumed.driver.pacemaker.cur_view == 2,
       resumed.driver.pacemaker.high_qc == SYNC_QC_1,
     }
@@ -396,7 +396,7 @@ module scenariosTest {
       .expect(not(stored(3, h1)))
       .expect(not(stored(3, h2)))
       .expect(has_sync_requests(3))
-      .expect(nodes.get(3).driver.orphans.keys() == Set(h1))
+      .expect(nodes.get(3).driver.keeper.by_block.keys() == Set(h1))
       .then(sync_step(3))
       .then(checked_step(3))
       .expect(stored(3, h1))
@@ -405,7 +405,7 @@ module scenariosTest {
       .expect(stored(3, h2))
       .expect(view_of(3) == 2)
       .expect(voted_of(3) == 2)
-      .expect(nodes.get(3).driver.orphans.keys() == Set())
+      .expect(nodes.get(3).driver.keeper.by_block.keys() == Set())
 
   run leaderProposesAfterSyncTest =
     val h1 = block_hash(1, 1)
@@ -415,8 +415,8 @@ module scenariosTest {
       .then(inject(2, vote_packet(0, 1, h1)))
       .then(inject(2, vote_packet(1, 1, h1)))
       .then(inject(2, vote_packet(3, 1, h1)))
-      .then(4.reps(_ => checked_step(2)))
-      .expect(nodes.get(2).driver.orphans.get(h1) == [NewQC({
+      .then(5.reps(_ => checked_step(2)))
+      .expect(nodes.get(2).driver.keeper.by_block.get(h1) == [NewQC({
         certificate: { signature: QuorumCert(Set(0, 1, 3)) }, block: h1, view: 1
       })])
       .expect(view_of(2) == 1)
@@ -424,7 +424,7 @@ module scenariosTest {
       .expect(not(stored(2, h1)))
       .expect(not(leader_finished(2)))
       .expect(has_sync_requests(2))
-      .expect(nodes.get(2).driver.orphans.keys() == Set(h1))
+      .expect(nodes.get(2).driver.keeper.by_block.keys() == Set(h1))
       .then(sync_step(2))
       .then(checked_step(2))
       .expect(stored(2, h1))
@@ -433,6 +433,6 @@ module scenariosTest {
       .expect(view_of(2) == 2)
       .expect(high_qc_of(2).view == 1)
       .expect(leader_finished(2))
-      .expect(nodes.get(2).driver.orphans.keys() == Set())
+      .expect(nodes.get(2).driver.keeper.by_block.keys() == Set())
       .expect(net.inbox.get(3).select(p => p.msg == ProposalMsg(proposal(2, 0, 2, high_qc_of(2)))).length() == 1)
 }

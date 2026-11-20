@@ -121,7 +121,7 @@ def describe(prev, cur):
 ROWS = [
     ('pacemaker', ['cur_view', 'cur_leader', 'high_qc', 'lock_expired', 'statuses', 'sent_wish', 'relayed_tc', 'id']),
     ('consensus', ['voted_view', 'proposed_view', 'qc_lock', 'exec_height', 'exec_hash']),
-    ('driver', ['pending', 'orphans']),
+    ('keeper', ['by_view', 'by_block']),
     ('node', ['view_timers', 'lock_timer', 'queue']),
 ]
 
@@ -129,8 +129,8 @@ ROWS = [
 def field(node, comp, name):
     if comp == 'node':
         return node.get(name)
-    if comp == 'driver':
-        return node['driver'].get(name)
+    if comp == 'keeper':
+        return node['driver']['keeper'].get(name)
     return node['driver'][comp].get(name)
 
 

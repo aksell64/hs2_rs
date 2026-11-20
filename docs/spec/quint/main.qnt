@@ -218,7 +218,7 @@ module main {
       not(has_messages(id)),
       // The leader of v has done its part: it proposed in v or already left v. Proposing and
       // sending happen in one step, so a proposal of a correct leader is by now in this
-      // node's inbox, queue, pending buffer or already processed. A faulty leader counts as
+      // node's inbox, queue, keeper or already processed. A faulty leader counts as
       // done: correct nodes must be able to time out on it.
       leader_finished(next_view_timer(node.view_timers)),
     }

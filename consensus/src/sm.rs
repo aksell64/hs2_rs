@@ -177,7 +177,8 @@ impl<
         let batch = staged.into_batch();
         self.db.commit_write_batch(batch)?;
 
-        self.process_committed_blocks(&result.committed);
+        self.mempool
+            .on_commands_commit(result.committed.iter().map(|block| &block.cmd));
 
         for input in result.replay {
             self.queue.push_front(input);
@@ -189,11 +190,6 @@ impl<
             sync: result.sync,
             committed: result.committed,
         }))
-    }
-
-    fn process_committed_blocks(&mut self, committed: &[Block<S, C>]) {
-        self.mempool
-            .on_commands_commit(committed.iter().map(|block| &block.cmd))
     }
 
     fn write_genesis(db: &mut DB, genesis: Block<S, C>, leaders: &LP) -> Result<(), KVError> {

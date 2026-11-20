@@ -55,11 +55,6 @@ module state_machine {
     else
       { input: Some(state.queue.head()), state: state.with("queue", state.queue.tail()) }
 
-  pure def handle_driver_output(state: NodeState, out: DriverOutput): NodeState =
-    match out {
-      | Replay(input) => push_to_queue_front(state, input)
-    }
-
   pure def apply_timer(state: NodeState, t: TimerCommand): NodeState =
     match t {
       | SetViewTimer(v) => state.with("view_timers", state.view_timers.union(Set(v)))
@@ -80,7 +75,7 @@ module state_machine {
       | Some(input) =>
         val res = apply_driver(popped.state.driver, popped.state.kv, input)
         val updated = popped.state.with("driver", res.driver).with("kv", res.kv)
-        val replayed = res.out.foldl(updated, handle_driver_output)
+        val replayed = res.replay.foldl(updated, push_to_queue_front)
         val timed = res.timers.foldl(replayed, apply_timer)
         {
           state: timed,

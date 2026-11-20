@@ -56,7 +56,7 @@ Renders the trace as markdown:
 
 - **Summary** — when each new QC appeared, when nodes committed, final views and committed chains.
 - **Step N** — the action taken on the step and the state of every correct node after it
-  (pacemaker, consensus, pending proposals, timers, queue) plus the network; changed values are in bold.
+  (pacemaker, consensus, inputs buffered by view and block, timers, queue) plus the network; changed values are in bold.
 
 `--from` / `--to` select the steps that are rendered in detail; the summary always covers the whole trace.
 

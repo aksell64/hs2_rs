@@ -12,6 +12,7 @@ module pacemaker {
   type PacemakerOutput =
   | NoPacemakerOutput
   | ProposeNow(View)
+  | ViewAdvanced(View)
 
   type Pacemaker = {
     id: NodeID,
@@ -122,12 +123,12 @@ module pacemaker {
       if (can_propose(pcm, v))
         { pacemaker: pcm, effects: [], out: ProposeNow(v) }
       else
-        { pacemaker: pcm, effects: [Timer(SetLockTimer(v))], out: NoPacemakerOutput }
+        { pacemaker: pcm, effects: [Timer(SetLockTimer(v))], out: ViewAdvanced(v) }
     else if (pcm.high_qc.view != v - 1)
       val status = send_to(Node(leader(v)), StatusMsg({ qc: pcm.high_qc, view: v }))
-      { pacemaker: pcm, effects: [status], out: NoPacemakerOutput }
+      { pacemaker: pcm, effects: [status], out: ViewAdvanced(v) }
     else
-      pacemaker_no_change(pcm)
+      { pacemaker: pcm, effects: [], out: ViewAdvanced(v) }
 
   pure def can_propose(pcm: Pacemaker, v: View): bool =
     v == pcm.cur_view and pcm.id == leader(v) and (pcm.high_qc.view == v - 1 or pcm.lock_expired == v)
