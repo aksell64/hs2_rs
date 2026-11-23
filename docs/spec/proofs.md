@@ -1,122 +1,122 @@
-# Доказательства
+# Proofs
 
-**Обозначения.** $`H`$ — честные узлы; $`V_i(t)`$ — view узла $`i`$ в момент $`t`$; $`e`$ — первый view рассматриваемой эпохи; $`l = L(v)`$ — честный лидер view $`v`$; $`a_i`$ — время первого входа $`i`$ в эпоху; $`D_i(u)`$ — дедлайн view $`u`$; $`d`$ — верхняя граница доставки после $`\mathrm{GST}`$; $`\tau`$ — интервал между соседними дедлайнами.
+**Notation.** $`H`$ is the set of honest nodes; $`V_i(t)`$ is the view of node $`i`$ at time $`t`$; $`e`$ is the first view of the epoch under consideration; $`l = L(v)`$ is the honest leader of view $`v`$; $`a_i`$ is the time when $`i`$ first enters the epoch; $`D_i(u)`$ is the deadline for view $`u`$; $`d`$ is the upper bound on message delivery time after $`\mathrm{GST}`$; $`\tau`$ is the interval between consecutive deadlines.
 
-**Предпосылки.** Комитет фиксирован и состоит из $`n=3f+1`$ узлов, из которых не более $`f`$ византийские. Лидеры ротируются по round-robin. Длина каждой эпохи равна $`n`$. Доставка между узлами положительная. Локальная обработка мгновенная. Расписания согласованы, $`\tau\gt\mathrm{LT}+7d`$. Необходимые блоки доступны, задержка blocksync равна $`0`$. Честные голоса доступны только адресату. $`\mathrm{LT}`$ — длительность lock-таймера, $`\mathrm{LT}\gt3d`$. Сообщение, отправленное честным узлом честному адресату в момент $`s`$, доставляется не позднее $`\max\{s,\mathrm{GST}\}+d`$. В `OnReceiveQC` после проверки сертификата блок под QC и необходимые предки синхронизируются и проходят `Update` от предков к потомкам до перехода view. Это правило применяется независимо от источника QC и текущего view.
+**Assumptions.** The committee is fixed and consists of $`n=3f+1`$ nodes, at most $`f`$ of which are Byzantine. Leaders rotate in round-robin order. Each epoch has length $`n`$. Message delivery between nodes takes strictly positive time. Local processing is instantaneous. Schedules are consistent, and $`\tau\gt\mathrm{LT}+7d`$. The required blocks are available, and the blocksync delay is $`0`$. Votes cast by honest nodes are available only to their recipients. $`\mathrm{LT}`$ is the lock timer duration, with $`\mathrm{LT}\gt3d`$. A message sent by an honest node to an honest recipient at time $`s`$ is delivered no later than $`\max\{s,\mathrm{GST}\}+d`$. In `OnReceiveQC`, after certificate verification, the block certified by the QC and its required ancestors are synchronized and processed by `Update` in ancestor-to-descendant order before the view transition. This rule applies regardless of the source of the QC and the current view.
 
 ## Safety
 
-**Определение (префикс).** Блок $`b`$ является префиксом блока $`b'`$, обозначаем $`b\preceq b'`$, если существует путь от $`b'`$ до $`b`$ по родительским ссылкам. Допускается путь нулевой длины, поэтому $`b\preceq b`$.
+**Definition (prefix).** A block $`b`$ is a prefix of a block $`b'`$, denoted by $`b\preceq b'`$, if there is a path from $`b'`$ to $`b`$ along parent links. A path of length zero is allowed, so $`b\preceq b`$.
 
-**Определение (конфликт).** Блоки $`b`$ и $`b'`$ конфликтуют, если
+**Definition (conflict).** Blocks $`b`$ and $`b'`$ conflict if
 
 $$
 b\npreceq b'\quad\land\quad b'\npreceq b.
 $$
 
-**Лемма S1 (единственность сертифицированного блока во view).** Если существуют валидные сертификаты $`\mathrm{QC}_v(b)`$ и $`\mathrm{QC}_v(b')`$, то $`b=b'`$.
+**Lemma S1 (uniqueness of the certified block in a view).** If valid certificates $`\mathrm{QC}_v(b)`$ and $`\mathrm{QC}_v(b')`$ exist, then $`b=b'`$.
 
-**Доказательство.** Предположим, что $`b\ne b'`$. Пусть $`Q`$ и $`Q'`$ — множества узлов, чьи голоса входят в эти сертификаты. Каждый сертификат содержит голоса не менее $`2f+1`$ различных узлов за соответствующий блок во view $`v`$. Поскольку всего узлов $`n=3f+1`$, получаем
+**Proof.** Suppose that $`b\ne b'`$. Let $`Q`$ and $`Q'`$ be the sets of nodes whose votes are included in these certificates. Each certificate contains votes from at least $`2f+1`$ distinct nodes for the corresponding block in view $`v`$. Since there are $`n=3f+1`$ nodes in total, we obtain
 
 $$
 |Q\cap Q'|\ge |Q|+|Q'|-n\ge 2(2f+1)-(3f+1)=f+1.
 $$
 
-Среди узлов пересечения есть хотя бы один честный, поскольку византийских узлов не более $`f`$. Он проголосовал за два разных блока $`b`$ и $`b'`$ во view $`v`$, что противоречит правилу протокола, по которому честный узел голосует не более одного раза в каждом view. Следовательно, $`b=b'`$. $`\square`$
+The intersection contains at least one honest node, since at most $`f`$ nodes are Byzantine. That node voted for two different blocks $`b`$ and $`b'`$ in view $`v`$, contradicting the protocol rule that an honest node votes at most once in each view. Therefore, $`b=b'`$. $`\square`$
 
-**Лемма S2 (о родителе сертифицированного блока).** Если для блока $`b\ne\mathrm{genesis}`$ существует валидный сертификат $`\mathrm{QC}_v(b)`$, то $`b.\mathrm{parent}=b.\mathrm{justify}.\mathrm{node}`$.
+**Lemma S2 (parent of a certified block).** If a valid certificate $`\mathrm{QC}_v(b)`$ exists for a block $`b\ne\mathrm{genesis}`$, then $`b.\mathrm{parent}=b.\mathrm{justify}.\mathrm{node}`$.
 
-**Доказательство.** В сертификате есть голос хотя бы одного честного узла, который перед голосованием проверил указанное равенство. $`\square`$
+**Proof.** The certificate contains a vote from at least one honest node, which checked this equality before voting. $`\square`$
 
-**Лемма S3 (монотонность голосований).** Если честный узел проголосовал во view $`u`$, то каждое его последующее голосование происходит во view $`w\gt u`$.
+**Lemma S3 (monotonicity of voting).** If an honest node voted in view $`u`$, then every subsequent vote it casts is in a view $`w\gt u`$.
 
-**Доказательство.** Перед голосованием узел проверяет `votedView < curView`, а при голосовании присваивает `votedView ← curView`. $`\square`$
+**Proof.** Before voting, the node checks `votedView < curView`, and when voting, it assigns `votedView ← curView`. $`\square`$
 
-**Лемма S4 (о префиксе сертифицированных блоков).** Пусть существуют валидные сертификаты $`\mathrm{QC}_v(b)`$ и $`\mathrm{QC}_{v+1}(b')`$, причём $`b'.\mathrm{justify}=\mathrm{QC}_v(b)`$. Тогда для любого валидного сертификата $`\mathrm{QC}_w(x)`$ при $`w\ge v`$ выполняется
+**Lemma S4 (prefix of certified blocks).** Suppose valid certificates $`\mathrm{QC}_v(b)`$ and $`\mathrm{QC}_{v+1}(b')`$ exist, with $`b'.\mathrm{justify}=\mathrm{QC}_v(b)`$. Then, for every valid certificate $`\mathrm{QC}_w(x)`$ with $`w\ge v`$,
 
 $$
 b\preceq x.
 $$
 
-**Доказательство.** Предположим, существует валидный сертификат $`\mathrm{QC}_w(x)`$ с $`w\ge v`$ и $`b\npreceq x`$. Выберем такой сертификат с минимальным $`w`$. По S1 при $`w=v`$ имеем $`x=b`$, а при $`w=v+1`$ имеем $`x=b'`$. По S2 блок $`b'`$ — ребёнок $`b`$, поэтому оба случая исключены и $`w\gt v+1`$.
+**Proof.** Suppose there is a valid certificate $`\mathrm{QC}_w(x)`$ with $`w\ge v`$ and $`b\npreceq x`$. Choose such a certificate with the smallest $`w`$. By S1, if $`w=v`$, then $`x=b`$, and if $`w=v+1`$, then $`x=b'`$. By S2, block $`b'`$ is a child of $`b`$, so both cases are excluded and $`w\gt v+1`$.
 
-Пусть $`x.\mathrm{justify}=\mathrm{QC}_q(p)`$. Кворумы сертификатов $`\mathrm{QC}_{v+1}(b')`$ и $`\mathrm{QC}_w(x)`$ пересекаются не менее чем по $`f+1`$ узлам, поэтому среди общих подписантов есть честный узел $`i`$. По S3 он проголосовал за $`b'`$ раньше, чем за $`x`$.
+Let $`x.\mathrm{justify}=\mathrm{QC}_q(p)`$. The quorums of certificates $`\mathrm{QC}_{v+1}(b')`$ and $`\mathrm{QC}_w(x)`$ intersect in at least $`f+1`$ nodes, so their common signers include an honest node $`i`$. By S3, it voted for $`b'`$ before voting for $`x`$.
 
-При обработке $`b'`$ узел $`i`$ выполняет `Update` и поднимает lock как минимум до $`v`$, поскольку $`b'.\mathrm{justify}=\mathrm{QC}_v(b)`$. View lock не убывает, поэтому к голосованию за $`x`$ правило проверки lock требует
+When processing $`b'`$, node $`i`$ executes `Update` and raises its lock to at least $`v`$, since $`b'.\mathrm{justify}=\mathrm{QC}_v(b)`$. The lock view never decreases, so when voting for $`x`$, the lock check requires
 
 $$
 q\ge\mathrm{view}(\mathrm{lockQC}_i)\ge v.
 $$
 
-Перед голосованием за $`x`$ узел $`i`$ обрабатывает $`\mathrm{QC}_q(p)`$, поэтому $`q\lt w`$. Иначе обработка сертификата перевела бы узел выше $`w`$ и исключила голосование в $`w`$.
+Before voting for $`x`$, node $`i`$ processes $`\mathrm{QC}_q(p)`$, so $`q\lt w`$. Otherwise, processing the certificate would move the node above $`w`$ and prevent it from voting in $`w`$.
 
-Если бы $`q\ge v`$, то по минимальности $`w`$ выполнялось бы $`b\preceq p`$. По S2 имеем $`p=x.\mathrm{parent}`$, откуда $`b\preceq p\preceq x`$, что противоречит выбору $`x`$. Следовательно, $`q\lt v`$, в противоречие с полученной оценкой $`q\ge v`$. $`\square`$
+If $`q\ge v`$, then the minimality of $`w`$ would imply $`b\preceq p`$. By S2, $`p=x.\mathrm{parent}`$, hence $`b\preceq p\preceq x`$, contradicting the choice of $`x`$. Therefore, $`q\lt v`$, contradicting the bound $`q\ge v`$ obtained above. $`\square`$
 
-**Лемма S5 (о цепочке сертифицированного блока).** Пусть существуют валидные сертификаты $`\mathrm{QC}_v(b)`$ и $`\mathrm{QC}_{v+1}(b')`$, причём $`b'.\mathrm{justify}=\mathrm{QC}_v(b)`$. Тогда для любого валидного сертификата $`\mathrm{QC}_w(x)`$ при $`w\ge v+1`$ существует ребёнок $`c`$ блока $`b`$, такой что
+**Lemma S5 (chain of a certified block).** Suppose valid certificates $`\mathrm{QC}_v(b)`$ and $`\mathrm{QC}_{v+1}(b')`$ exist, with $`b'.\mathrm{justify}=\mathrm{QC}_v(b)`$. Then, for every valid certificate $`\mathrm{QC}_w(x)`$ with $`w\ge v+1`$, there is a child $`c`$ of block $`b`$ such that
 
 $$
 c\preceq x,\qquad c.\mathrm{justify}=\mathrm{QC}_v(b).
 $$
 
-**Доказательство.** Предположим, существует сертификат $`\mathrm{QC}_w(x)`$, для которого утверждение неверно, и выберем такой сертификат с минимальным $`w\ge v+1`$. При $`w=v+1`$ по S1 имеем $`x=b'`$, а по S2 блок $`b'`$ — ребёнок $`b`$ с нужным justify, поэтому подходит $`c=x=b'`$. Следовательно, $`w\gt v+1`$.
+**Proof.** Suppose there is a certificate $`\mathrm{QC}_w(x)`$ for which the claim is false, and choose such a certificate with the smallest $`w\ge v+1`$. If $`w=v+1`$, then by S1, $`x=b'`$, and by S2, block $`b'`$ is a child of $`b`$ with the required justify, so $`c=x=b'`$ satisfies the claim. Therefore, $`w\gt v+1`$.
 
-Пусть $`x.\mathrm{justify}=\mathrm{QC}_q(p)`$. Кворумы сертификатов $`\mathrm{QC}_{v+1}(b')`$ и $`\mathrm{QC}_w(x)`$ пересекаются не менее чем по $`f+1`$ узлам, поэтому среди общих подписантов есть честный узел $`i`$. По S3 он проголосовал за $`b'`$ раньше, чем за $`x`$.
+Let $`x.\mathrm{justify}=\mathrm{QC}_q(p)`$. The quorums of certificates $`\mathrm{QC}_{v+1}(b')`$ and $`\mathrm{QC}_w(x)`$ intersect in at least $`f+1`$ nodes, so their common signers include an honest node $`i`$. By S3, it voted for $`b'`$ before voting for $`x`$.
 
-При обработке $`b'`$ узел $`i`$ выполняет `Update` и поднимает lock как минимум до $`v`$. View lock не убывает, поэтому проверка перед голосованием за $`x`$ требует $`q\ge v`$. Перед голосованием узел обрабатывает $`\mathrm{QC}_q(p)`$, поэтому $`q\lt w`$: иначе он перешёл бы выше $`w`$ и не смог бы проголосовать в $`w`$. Следовательно,
+When processing $`b'`$, node $`i`$ executes `Update` and raises its lock to at least $`v`$. The lock view never decreases, so the check before voting for $`x`$ requires $`q\ge v`$. Before voting, the node processes $`\mathrm{QC}_q(p)`$, so $`q\lt w`$: otherwise, it would move above $`w`$ and could not vote in $`w`$. Therefore,
 
 $$
 v\le q\lt w.
 $$
 
-- Если $`q=v`$, то по S1 имеем $`p=b`$, а по S2 — $`x.\mathrm{parent}=p=b`$. Поэтому подходит $`c=x`$.
-- Если $`q\ge v+1`$, то по минимальности $`w`$ существует ребёнок $`c`$ блока $`b`$ с $`c\preceq p`$ и $`c.\mathrm{justify}=\mathrm{QC}_v(b)`$. По S2 блок $`p`$ — родитель $`x`$, поэтому $`c\preceq p\preceq x`$.
+- If $`q=v`$, then by S1, $`p=b`$, and by S2, $`x.\mathrm{parent}=p=b`$. Thus, $`c=x`$ satisfies the claim.
+- If $`q\ge v+1`$, then by the minimality of $`w`$, there is a child $`c`$ of block $`b`$ with $`c\preceq p`$ and $`c.\mathrm{justify}=\mathrm{QC}_v(b)`$. By S2, block $`p`$ is the parent of $`x`$, so $`c\preceq p\preceq x`$.
 
-В обоих случаях получаем противоречие с выбором $`x`$. $`\square`$
+Both cases contradict the choice of $`x`$. $`\square`$
 
-**Теорема (safety).** Если честные узлы закоммитили блоки $`b_1`$ и $`b_2`$, то
+**Theorem (safety).** If honest nodes have committed blocks $`b_1`$ and $`b_2`$, then
 
 $$
 b_1\preceq b_2\quad\lor\quad b_2\preceq b_1.
 $$
 
-**Доказательство.** Если один из блоков — genesis, утверждение следует из того, что genesis — префикс каждого закоммиченного блока. Иначе для каждого $`j\in\{1,2\}`$ коммит $`b_j`$ произошёл при обработке некоторого блока $`x_j`$, для которого
+**Proof.** If either block is genesis, the claim follows because genesis is a prefix of every committed block. Otherwise, for each $`j\in\{1,2\}`$, the commit of $`b_j`$ occurred while processing a block $`x_j`$ such that
 
 $$
 x_j.\mathrm{justify}=\mathrm{QC}_{v_j+1}(d_j),\qquad
 d_j.\mathrm{justify}=\mathrm{QC}_{v_j}(c_j).
 $$
 
-Оба сертификата валидны, и $`d_j.\mathrm{parent}=c_j`$. При этой обработке `Update` вызвал $`\mathrm{onCommit}(c_j)`$, закоммитивший $`c_j`$ и его ещё не закоммиченных предков, поэтому $`b_j\preceq c_j`$.
+Both certificates are valid, and $`d_j.\mathrm{parent}=c_j`$. During this processing, `Update` called $`\mathrm{onCommit}(c_j)`$, which committed $`c_j`$ and its ancestors that had not yet been committed, so $`b_j\preceq c_j`$.
 
-Без ограничения общности $`v_1\le v_2`$. По S4 имеем $`c_1\preceq c_2`$. Следовательно, $`b_1\preceq c_2`$ и $`b_2\preceq c_2`$. Оба блока лежат на одной цепочке родительских ссылок от $`c_2`$, поэтому один является префиксом другого. $`\square`$
+Without loss of generality, $`v_1\le v_2`$. By S4, $`c_1\preceq c_2`$. Therefore, $`b_1\preceq c_2`$ and $`b_2\preceq c_2`$. Both blocks lie on the same chain of parent links from $`c_2`$, so one is a prefix of the other. $`\square`$
 
 ## Liveness
 
-**Определение.** Дедлайн view $`u`$ у узла $`i`$ в рассматриваемой эпохе:
+**Definition.** The deadline for view $`u`$ at node $`i`$ in the epoch under consideration is
 
 $$
 D_i(u):=a_i+(u-e+1)\tau.
 $$
 
-**Определение.** View $`v`$ называется $`\mathrm{goodView}`$, если первый честный вход в его эпоху произошёл после $`\mathrm{GST}`$, а лидеры $`v`$ и $`v+1`$ честные.
+**Definition.** View $`v`$ is called a $`\mathrm{goodView}`$ if the first honest entry into its epoch occurred after $`\mathrm{GST}`$ and the leaders of $`v`$ and $`v+1`$ are honest.
 
-**Определение.** View $`v`$ называется $`\mathrm{commitView}`$, если $`v`$ — $`\mathrm{goodView}`$, а лидер $`v+2`$ честный.
+**Definition.** View $`v`$ is called a $`\mathrm{commitView}`$ if $`v`$ is a $`\mathrm{goodView}`$ and the leader of $`v+2`$ is honest.
 
-**Лемма L1.** Пусть $`E`$ — эпоха, первый честный вход в которую произошёл в момент $`t\ge\mathrm{GST}`$. Тогда каждый честный узел пересечёт границу $`E`$ в интервале $`[t,t+2d]`$:
+**Lemma L1.** Let $`E`$ be an epoch whose first honest entry occurred at time $`t\ge\mathrm{GST}`$. Then every honest node crosses the boundary of $`E`$ within the interval $`[t,t+2d]`$:
 
 $$
 \forall i\in H:\qquad t\le t_i(E)\le t+2d.
 $$
 
-Где $`t_i(E)`$ — момент, когда узел $`i`$ впервые достиг view не ниже $`e`$.
+Here, $`t_i(E)`$ is the time when node $`i`$ first reaches a view at least $`e`$.
 
-**Доказательство.** Пусть $`j`$ — первый честный узел, пересёкший границу $`E`$ в момент $`t`$. Он входит по $`\mathrm{TC}(e)`$ или $`\mathrm{QC}(e-1)`$. Сертификат за более высокий view требует честного подписанта, уже пересёкшего границу $`E`$ раньше $`t`$, что противоречит выбору $`j`$.
+**Proof.** Let $`j`$ be the first honest node to cross the boundary of $`E`$, at time $`t`$. It enters via $`\mathrm{TC}(e)`$ or $`\mathrm{QC}(e-1)`$. A certificate for a higher view requires an honest signer that had already crossed the boundary of $`E`$ before $`t`$, contradicting the choice of $`j`$.
 
-При входе по $`\mathrm{QC}(e-1)`$ до перехода у $`j`$ выполнено $`\mathrm{curView}\lt e`$, поэтому он рассылает QC всем. При входе по $`\mathrm{TC}(e)`$ узел $`j`$ рассылает его всем как лидер эпохи. В обоих случаях каждый честный получает сертификат не позднее $`t+d\le t+2d`$.
+When entering via $`\mathrm{QC}(e-1)`$, node $`j`$ has $`\mathrm{curView}\lt e`$ before the transition, so it broadcasts the QC to all nodes. When entering via $`\mathrm{TC}(e)`$, node $`j`$ broadcasts it to all nodes as a leader in the epoch. In either case, every honest node receives the certificate no later than $`t+d\le t+2d`$.
 
-Обработка сертификата переводит узел во view не ниже $`e`$, если он ещё не пересёк эту границу. Следовательно, $`t_i(E)\le t+2d`$. Из выбора $`t`$ следует $`t_i(E)\ge t`$. $`\square`$
+Processing the certificate moves the node to a view at least $`e`$ if it has not yet crossed that boundary. Therefore, $`t_i(E)\le t+2d`$. The choice of $`t`$ implies $`t_i(E)\ge t`$. $`\square`$
 
-**Лемма L2 (о дедлайнах view).** Пусть первый честный вход в эпоху $`E`$ произошёл после $`\mathrm{GST}`$, $`v\in E`$, а $`t_0`$ — момент первого честного входа в $`v`$. Тогда для любых честных узлов $`i,j`$, запустивших расписание $`E`$, выполняется
+**Lemma L2 (view deadlines).** Suppose the first honest entry into epoch $`E`$ occurred after $`\mathrm{GST}`$, $`v\in E`$, and $`t_0`$ is the time of the first honest entry into $`v`$. Then, for any honest nodes $`i,j`$ that started the schedule for $`E`$,
 
 $$
 D_i(v)\ge t_0+\tau-2d,
@@ -124,7 +124,7 @@ D_i(v)\ge t_0+\tau-2d,
 |D_i(v)-D_j(v)|\le2d.
 $$
 
-**Доказательство.** Пусть $`k`$ — первый честный узел, вошедший в $`v`$. Он входит не позднее $`a_k+(v-e)\tau`$. При первом входе в эпоху это следует из $`t_0=a_k`$, а при переходах внутри эпохи его доведут таймеры предыдущих view. По лемме L1 времена входа честных в эпоху различаются не более чем на $`2d`$, поэтому
+**Proof.** Let $`k`$ be the first honest node to enter $`v`$. It enters no later than $`a_k+(v-e)\tau`$. On its first entry into the epoch, this follows from $`t_0=a_k`$; for transitions within the epoch, the timers of preceding views bring it there. By Lemma L1, honest nodes' entry times into the epoch differ by at most $`2d`$, so
 
 $$
 D_i(v)-t_0\ge\tau+a_i-a_k\ge\tau-2d,
@@ -132,165 +132,165 @@ D_i(v)-t_0\ge\tau+a_i-a_k\ge\tau-2d,
 |D_i(v)-D_j(v)|=|a_i-a_j|\le2d.\quad\square
 $$
 
-**Следствие леммы L2.** При $`\tau\gt\mathrm{LT}+7d`$ для каждого честного узла $`i`$, запустившего расписание $`E`$, выполняется
+**Corollary to Lemma L2.** If $`\tau\gt\mathrm{LT}+7d`$, then for every honest node $`i`$ that started the schedule for $`E`$,
 
 $$
 D_i(v)\gt t_0+\mathrm{LT}+5d.
 $$
 
-**Лемма L3.** Пусть $`v\in E`$, а первый честный вход в эпоху $`E`$ произошёл после $`\mathrm{GST}`$. Если честный лидер $`l = L(v)`$ входит в $`v`$ в момент $`t_0`$, то
+**Lemma L3.** Suppose $`v\in E`$ and the first honest entry into epoch $`E`$ occurred after $`\mathrm{GST}`$. If the honest leader $`l = L(v)`$ enters $`v`$ at time $`t_0`$, then
 
 $$
 \forall i\in H:\quad V_i(t_0)\le v.
 $$
 
-**Доказательство.** Предположим, существует честный $`i`$ с $`V_i(t_0) \gt v`$. Пусть $`t_1 \le t_0`$ — момент первого перехода любого честного из view $`\le v`$ во view $`\gt v`$.
+**Proof.** Suppose there is an honest node $`i`$ with $`V_i(t_0) \gt v`$. Let $`t_1 \le t_0`$ be the time of the first transition by any honest node from a view $`\le v`$ to a view $`\gt v`$.
 
-Лидер входит в $`v`$ не позднее $`a_l+(v-e)\tau`$ — либо сразу при входе в эпоху, либо его доведут таймеры предыдущих view. $`\mathrm{QC}`$ может ускорить продвижение. По лемме L1 для любого честного $`k`$ с расписанием $`E`$ выполняется $`|a_k-a_l|\le2d`$. Поэтому
+The leader enters $`v`$ no later than $`a_l+(v-e)\tau`$: either immediately upon entering the epoch or as a result of the timers of preceding views. A $`\mathrm{QC}`$ may accelerate its progress. By Lemma L1, for any honest node $`k`$ with a schedule for $`E`$, $`|a_k-a_l|\le2d`$. Therefore,
 
 $$
 t_0\le a_l+(v-e)\tau,\qquad
 D_k(v)-t_0\ge\tau+a_k-a_l\ge\tau-2d \gt 0.
 $$
 
-Теперь разберём первый переход выше $`v`$ в $`t_1`$:
+Now consider the first transition above $`v`$ at $`t_1`$:
 
-- По таймауту $`v`$ или $`\mathrm{TC}(v+1)`$. При локальном таймауте честный узел $`k`$ переходит не раньше $`D_k(v)`$. Для $`\mathrm{TC}`$ нужен $`\mathrm{Wish}(v+1)`$ честного подписанта $`k`$, отправленный не раньше $`D_k(v)`$; собрать и использовать $`\mathrm{TC}`$ можно лишь после этой подписи. В обоих случаях $`t_1 \ge D_k(v) \gt t_0`$.
-- По $`\mathrm{QC}(v)`$. Честный $`l`$ предлагает только после входа в $`v`$. Нужные для $`\mathrm{QC}`$ честные голоса и положительная доставка дают $`t_1 \gt t_0`$.
-- По $`\mathrm{QC}(q)`$, $`q \gt v`$, или $`\mathrm{TC}(q)`$, $`q \gt v+1`$. $`q`$ — view сертификата. Честный подписант уже находился выше $`v`$ раньше $`t_1`$: противоречие с выбором первого перехода.
+- Via a timeout of $`v`$ or $`\mathrm{TC}(v+1)`$. With a local timeout, an honest node $`k`$ transitions no earlier than $`D_k(v)`$. A $`\mathrm{TC}`$ requires a $`\mathrm{Wish}(v+1)`$ from an honest signer $`k`$, sent no earlier than $`D_k(v)`$; the $`\mathrm{TC}`$ can be assembled and used only after this signature. In either case, $`t_1 \ge D_k(v) \gt t_0`$.
+- Via $`\mathrm{QC}(v)`$. The honest leader $`l`$ proposes only after entering $`v`$. The honest votes required for the $`\mathrm{QC}`$ and strictly positive message delivery time imply $`t_1 \gt t_0`$.
+- Via $`\mathrm{QC}(q)`$, $`q \gt v`$, or $`\mathrm{TC}(q)`$, $`q \gt v+1`$. Here, $`q`$ is the certificate view. An honest signer was already above $`v`$ before $`t_1`$, contradicting the choice of the first transition.
 
-В первых двух ветках $`t_1 \gt t_0`$ противоречит $`t_1 \le t_0`$, в последней — минимальности $`t_1`$. Следовательно, $`\forall i\in H:\ V_i(t_0)\le v`$. $`\square`$
+In the first two cases, $`t_1 \gt t_0`$ contradicts $`t_1 \le t_0`$; the last case contradicts the minimality of $`t_1`$. Therefore, $`\forall i\in H:\ V_i(t_0)\le v`$. $`\square`$
 
-**Следствие леммы L3.** В условиях леммы L3 при входе лидера $`L(v)`$ в $`v`$ в момент $`s`$ для каждого честного узла $`i`$, запустившего расписание $`E`$, выполняется
+**Corollary to Lemma L3.** Under the conditions of Lemma L3, when leader $`L(v)`$ enters $`v`$ at time $`s`$, for every honest node $`i`$ that started the schedule for $`E`$,
 
 $$
 D_i(v)\ge s+\tau-2d\gt s+\mathrm{LT}.
 $$
 
-**Лемма L4 (о проверке lock).** Пусть $`v`$ — $`\mathrm{goodView}`$, $`b`$ — блок, предложенный $`L(v)`$, а $`t_i`$ — момент проверки $`b`$ честным узлом $`i`$ во view $`v`$. Если $`\mathrm{QC}_v(b)`$ ещё не собран, то
+**Lemma L4 (lock check).** Let $`v`$ be a $`\mathrm{goodView}`$, let $`b`$ be the block proposed by $`L(v)`$, and let $`t_i`$ be the time when honest node $`i`$ checks $`b`$ in view $`v`$. If $`\mathrm{QC}_v(b)`$ has not yet been assembled, then
 
 $$
 \mathrm{view}(\mathrm{lockQC}_i(t_i))
 \le \mathrm{view}(b.\mathrm{justify}).
 $$
 
-Где $`\mathrm{lockQC}_i(t_i)`$ — lock узла $`i`$ перед проверкой предложения.
+Here, $`\mathrm{lockQC}_i(t_i)`$ is the lock of node $`i`$ before checking the proposal.
 
-**Доказательство.** Пусть $`q=b.\mathrm{justify}`$. Честный лидер предлагает в $`v`$ с $`\mathrm{view}(q)\le v-1`$.
+**Proof.** Let $`q=b.\mathrm{justify}`$. The honest leader proposes in $`v`$ with $`\mathrm{view}(q)\le v-1`$.
 
-- Если $`\mathrm{view}(q)=v-1`$, lock узла в $`v`$ не выше $`q`$: известный ему $`\mathrm{QC}`$ с номером не ниже $`v`$ уже перевёл бы его выше $`v`$.
-- Если $`\mathrm{view}(q)\lt v-1`$, до предложения никто из честных не получил $`\mathrm{QC}(v-1)`$: его первым собирает $`L(v)`$. Честные входят по таймерам либо $`\mathrm{TC}`$ и отправляют статусы. При разбросе входа $`2d`$ статусы приходят за $`3d\lt\mathrm{LT}`$; выбранный $`q`$ покрывает их $`\mathrm{highQC}`$ и locks.
+- If $`\mathrm{view}(q)=v-1`$, the node's lock in $`v`$ is no higher than $`q`$: a known $`\mathrm{QC}`$ with view at least $`v`$ would already have moved it above $`v`$.
+- If $`\mathrm{view}(q)\lt v-1`$, no honest node has received $`\mathrm{QC}(v-1)`$ before the proposal: $`L(v)`$ is the first to assemble it. Honest nodes enter via timers or a $`\mathrm{TC}`$ and send status messages. With entry times differing by at most $`2d`$, the status messages arrive within $`3d\lt\mathrm{LT}`$; the chosen $`q`$ is at least as high as their $`\mathrm{highQC}`$ values and locks.
 
-В обоих случаях $`\mathrm{view}(\mathrm{lockQC}_i(t_i))\le\mathrm{view}(q)`$. $`\square`$
+In either case, $`\mathrm{view}(\mathrm{lockQC}_i(t_i))\le\mathrm{view}(q)`$. $`\square`$
 
-**Лемма L5 (о сборе и доставке QC).** Пусть $`v`$ — $`\mathrm{goodView}`$, $`t_0`$ — момент первого честного входа в $`v`$, а $`b`$ — блок, предложенный $`L(v)`$. Тогда для $`\mathrm{QC}_v(b)`$ выполняются следующие оценки:
+**Lemma L5 (QC assembly and delivery).** Let $`v`$ be a $`\mathrm{goodView}`$, let $`t_0`$ be the time of the first honest entry into $`v`$, and let $`b`$ be the block proposed by $`L(v)`$. Then the following bounds hold for $`\mathrm{QC}_v(b)`$:
 
-Если $`L(v)`$ вошёл в $`v`$ по $`\mathrm{QC}(v-1)`$, то $`L(v+1)`$ соберёт $`\mathrm{QC}_v(b)`$ не позднее $`t_0+4d`$, а все честные обработают его не позднее $`t_0+5d`$.
+If $`L(v)`$ entered $`v`$ via $`\mathrm{QC}(v-1)`$, then $`L(v+1)`$ assembles $`\mathrm{QC}_v(b)`$ no later than $`t_0+4d`$, and all honest nodes process it no later than $`t_0+5d`$.
 
-Если $`L(v)`$ вошёл в $`v`$ по таймеру или $`\mathrm{TC}`$, то $`L(v+1)`$ соберёт $`\mathrm{QC}_v(b)`$ не позднее $`t_0+4d+\mathrm{LT}`$, а все честные обработают его не позднее $`t_0+5d+\mathrm{LT}`$.
+If $`L(v)`$ entered $`v`$ via a timer or a $`\mathrm{TC}`$, then $`L(v+1)`$ assembles $`\mathrm{QC}_v(b)`$ no later than $`t_0+4d+\mathrm{LT}`$, and all honest nodes process it no later than $`t_0+5d+\mathrm{LT}`$.
 
-**Доказательство.** Пусть $`t_1`$ — момент входа $`L(v)`$ в $`v`$, $`t_p`$ — момент отправки $`b`$, а $`q=b.\mathrm{justify}`$. Моменты $`t_1`$ и $`t_p`$ существуют, поскольку по условию честный $`L(v)`$ предложил $`b`$ во view $`v`$.
+**Proof.** Let $`t_1`$ be the time when $`L(v)`$ enters $`v`$, let $`t_p`$ be the time when $`b`$ is sent, and let $`q=b.\mathrm{justify}`$. The times $`t_1`$ and $`t_p`$ exist because, by assumption, the honest leader $`L(v)`$ proposed $`b`$ in view $`v`$.
 
-Если первый честный вошёл по $`\mathrm{QC}(v-1)`$, его первым собрал честный $`L(v)`$. При входе по таймеру используем разброс дедлайнов $`v-1`$ не более $`2d`$ по лемме L2, а по $`\mathrm{TC}`$ на границе эпохи — лемму L1. Поэтому $`t_0\le t_1\le t_0+2d`$.
+If the first honest node entered via $`\mathrm{QC}(v-1)`$, the honest leader $`L(v)`$ was the first to assemble it. For entry via a timer, we use the bound of $`2d`$ on the difference between deadlines for $`v-1`$ from Lemma L2; for entry via a $`\mathrm{TC}`$ at an epoch boundary, we use Lemma L1. Therefore, $`t_0\le t_1\le t_0+2d`$.
 
-- Если $`L(v)`$ вошёл по $`\mathrm{QC}(v-1)`$, то $`t_p=t_1\le t_0+2d`$.
-- Если по таймеру или $`\mathrm{TC}`$, то $`t_p\le t_1+\mathrm{LT}\le t_0+2d+\mathrm{LT}`$.
+- If $`L(v)`$ entered via $`\mathrm{QC}(v-1)`$, then $`t_p=t_1\le t_0+2d`$.
+- If it entered via a timer or a $`\mathrm{TC}`$, then $`t_p\le t_1+\mathrm{LT}\le t_0+2d+\mathrm{LT}`$.
 
-Следовательно, каждый честный $`i`$ получает $`b`$ в момент $`t_i\le t_p+d`$.
+Therefore, every honest node $`i`$ receives $`b`$ at a time $`t_i\le t_p+d`$.
 
-По следствию леммы L2
+By the corollary to Lemma L2,
 
 $$
 D_i(v)\gt t_0+\mathrm{LT}+5d\ge t_p+3d\gt t_p+d.
 $$
 
-Поэтому таймауты $`v`$ не наступают до $`t_p+3d`$, что покрывает получение предложения, сбор QC и доставку следующего предложения.
+Thus, timeouts of $`v`$ do not occur before $`t_p+3d`$, which covers receipt of the proposal, assembly of the QC, and delivery of the next proposal.
 
-Если $`\mathrm{QC}_v(b)`$ уже собран к $`t_p+d`$, требуемая оценка выполнена. Иначе по лемме L3 при входе лидера все находятся не выше $`v`$, таймауты исключены полученной оценкой, а первый честный переход по сертификату выше $`v`$ требует $`\mathrm{QC}_v(b)`$. Следовательно, до $`t_p+d`$ все честные находятся не выше $`v`$.
+If $`\mathrm{QC}_v(b)`$ has already been assembled by $`t_p+d`$, the required bound holds. Otherwise, by Lemma L3, all honest nodes are at or below $`v`$ when the leader enters; timeouts are excluded by the bound above, and the first honest transition above $`v`$ via a certificate requires $`\mathrm{QC}_v(b)`$. Therefore, all honest nodes remain at or below $`v`$ until $`t_p+d`$.
 
-Если получатель ещё ниже $`v`$ и $`\mathrm{view}(q)=v-1`$, обработка $`q`$ переводит его в $`v`$. При $`\mathrm{view}(q)\lt v-1`$ честные входят по таймерам либо $`\mathrm{TC}`$ не позднее $`t_0+2d`$, до предложения после $`\mathrm{LT}`$.
+If a recipient is still below $`v`$ and $`\mathrm{view}(q)=v-1`$, processing $`q`$ moves it to $`v`$. If $`\mathrm{view}(q)\lt v-1`$, honest nodes enter via timers or a $`\mathrm{TC}`$ no later than $`t_0+2d`$, before the proposal sent after $`\mathrm{LT}`$.
 
-Таким образом, каждый честный проверяет $`b`$ во view $`v`$. По лемме L4 его lock не выше $`q`$; поскольку честный $`L(v)`$ предлагает единственный блок, узел голосует за $`b`$ либо уже проголосовал. Все честные голоса отправлены к $`t_p+d`$ и доставлены $`L(v+1)`$ к $`t_p+2d`$.
+Thus, every honest node checks $`b`$ in view $`v`$. By Lemma L4, its lock is no higher than $`q`$; since the honest leader $`L(v)`$ proposes a single block, the node votes for $`b`$ or has already done so. All honest votes are sent by $`t_p+d`$ and delivered to $`L(v+1)`$ by $`t_p+2d`$.
 
-Следовательно, в обоих случаях $`L(v+1)`$ собирает $`\mathrm{QC}_v(b)`$ не позднее $`t_p+2d`$.
+Therefore, in both cases, $`L(v+1)`$ assembles $`\mathrm{QC}_v(b)`$ no later than $`t_p+2d`$.
 
-Выход выше $`v`$ по таймауту или $`\mathrm{TC}`$ исключён оценкой $`D_i(v)\gt t_p+3d`$, а первый честный переход выше $`v`$ по $`\mathrm{QC}`$ требует $`\mathrm{QC}_v(b)`$, который первым собирает сам $`L(v+1)`$. Следовательно, до сборки $`\mathrm{QC}_v(b)`$ честный $`L(v+1)`$ не мог войти выше $`v`$. Собрав его, лидер входит в $`v+1`$ и сразу рассылает предложение $`b^{\ast}`$ с $`b^{\ast}.\mathrm{justify}=\mathrm{QC}_v(b)`$. Каждый честный получает его не позднее $`t_p+3d`$.
+A transition above $`v`$ via a timeout or a $`\mathrm{TC}`$ is excluded by the bound $`D_i(v)\gt t_p+3d`$, and the first honest transition above $`v`$ via a $`\mathrm{QC}`$ requires $`\mathrm{QC}_v(b)`$, which $`L(v+1)`$ itself is the first to assemble. Therefore, the honest leader $`L(v+1)`$ could not have entered a view above $`v`$ before assembling $`\mathrm{QC}_v(b)`$. After assembling it, the leader enters $`v+1`$ and immediately broadcasts a proposal $`b^{\ast}`$ with $`b^{\ast}.\mathrm{justify}=\mathrm{QC}_v(b)`$. Every honest node receives it no later than $`t_p+3d`$.
 
-Вложенный $`\mathrm{QC}`$ обрабатывается до проверки view самого предложения: получатель учитывает его либо уже знает сертификат с номером не ниже $`v`$. Поэтому ранний переход по $`\mathrm{QC}`$ не нарушает оценку. Подставляя две оценки $`t_p`$, получаем сроки из формулировки. $`\square`$
+The embedded $`\mathrm{QC}`$ is processed before the view of the proposal itself is checked: the recipient processes the certificate or already knows a certificate with view at least $`v`$. Thus, an early transition via a $`\mathrm{QC}`$ does not invalidate the bound. Substituting the two bounds on $`t_p`$ gives the deadlines stated in the lemma. $`\square`$
 
-**Следствие леммы L5.** Пусть $`v-1`$ — $`\mathrm{goodView}`$, а $`b`$ — блок, предложенный $`L(v-1)`$ во view $`v-1`$. Тогда $`L(v)`$ первым среди честных входит в $`v`$ в момент сборки $`\mathrm{QC}_{v-1}(b)`$. Причём ни один честный узел не входит в $`v`$ по таймауту $`v-1`$.
+**Corollary to Lemma L5.** Let $`v-1`$ be a $`\mathrm{goodView}`$, and let $`b`$ be the block proposed by $`L(v-1)`$ in view $`v-1`$. Then $`L(v)`$ is the first honest node to enter $`v`$, at the time it assembles $`\mathrm{QC}_{v-1}(b)`$. Moreover, no honest node enters $`v`$ via a timeout of $`v-1`$.
 
-**Лемма L6.** Пусть $`v`$ — $`\mathrm{commitView}`$, $`b`$ — блок, предложенный лидером $`L(v)`$ во view $`v`$, а $`t_{\mathrm{commit}}^{\,i}(b)`$ — момент коммита $`b`$ у честного узла $`i`$. Тогда каждый честный узел закоммитит $`b`$, причём
+**Lemma L6.** Let $`v`$ be a $`\mathrm{commitView}`$, let $`b`$ be the block proposed by leader $`L(v)`$ in view $`v`$, and let $`t_{\mathrm{commit}}^{\,i}(b)`$ be the time when honest node $`i`$ commits $`b`$. Then every honest node commits $`b`$, and
 
 $$
 \forall i\in H:\qquad
 t_0\le t_{\mathrm{commit}}^{\,i}(b)\le t_{\mathrm{qc}} \lt \infty.
 $$
 
-Где:
+Here:
 
-- $`t_0`$ — момент первого честного входа в $`v`$;
-- $`t_{\mathrm{qc}}`$ — момент, к которому все честные получили и обработали предложение лидера $`v+2`$.
+- $`t_0`$ is the time of the first honest entry into $`v`$;
+- $`t_{\mathrm{qc}}`$ is the time by which all honest nodes have received and processed the proposal from the leader of $`v+2`$.
 
-Если $`L(v)`$ вошёл в $`v`$ по $`\mathrm{QC}(v-1)`$, то $`t_{\mathrm{qc}}\le t_0+9d`$.
+If $`L(v)`$ entered $`v`$ via $`\mathrm{QC}(v-1)`$, then $`t_{\mathrm{qc}}\le t_0+9d`$.
 
-Если $`L(v)`$ вошёл в $`v`$ по таймауту или $`\mathrm{TC}`$, то $`t_{\mathrm{qc}}\le t_0+9d+\mathrm{LT}`$.
+If $`L(v)`$ entered $`v`$ via a timeout or a $`\mathrm{TC}`$, then $`t_{\mathrm{qc}}\le t_0+9d+\mathrm{LT}`$.
 
-**Доказательство.** Пусть $`t_1`$ — момент сборки $`\mathrm{QC}_v(b)`$ лидером $`L(v+1)`$. По лемме L5 имеем $`t_1\le t_0+4d`$ при входе $`L(v)`$ по $`\mathrm{QC}(v-1)`$ и $`t_1\le t_0+4d+\mathrm{LT}`$ при входе по таймауту или $`\mathrm{TC}`$. Лидер входит в $`v+1`$ по этому QC и сразу предлагает дочерний блок $`b^{\ast}`$ с $`b^{\ast}.\mathrm{justify}=\mathrm{QC}_v(b)`$.
+**Proof.** Let $`t_1`$ be the time when leader $`L(v+1)`$ assembles $`\mathrm{QC}_v(b)`$. By Lemma L5, $`t_1\le t_0+4d`$ if $`L(v)`$ entered via $`\mathrm{QC}(v-1)`$, and $`t_1\le t_0+4d+\mathrm{LT}`$ if it entered via a timeout or a $`\mathrm{TC}`$. The leader enters $`v+1`$ via this QC and immediately proposes a child block $`b^{\ast}`$ with $`b^{\ast}.\mathrm{justify}=\mathrm{QC}_v(b)`$.
 
-View $`v+1`$ также является $`\mathrm{goodView}`$. Пусть $`t_2`$ — момент сборки $`\mathrm{QC}_{v+1}(b^{\ast})`$ лидером $`L(v+2)`$. По следствию леммы L5 первый честный вход в $`v+1`$ происходит в $`t_1`$, поэтому повторное применение леммы L5 для входа по QC даёт $`t_2\le t_1+4d`$.
+View $`v+1`$ is also a $`\mathrm{goodView}`$. Let $`t_2`$ be the time when leader $`L(v+2)`$ assembles $`\mathrm{QC}_{v+1}(b^{\ast})`$. By the corollary to Lemma L5, the first honest entry into $`v+1`$ occurs at $`t_1`$, so applying Lemma L5 again for entry via a QC gives $`t_2\le t_1+4d`$.
 
-В момент $`t_2`$ лидер $`L(v+2)`$ входит в $`v+2`$ и сразу рассылает дочерний блок $`b^{\ast\ast}`$ с $`b^{\ast\ast}.\mathrm{justify}=\mathrm{QC}_{v+1}(b^{\ast})`$. Следовательно,
+At time $`t_2`$, leader $`L(v+2)`$ enters $`v+2`$ and immediately broadcasts a child block $`b^{\ast\ast}`$ with $`b^{\ast\ast}.\mathrm{justify}=\mathrm{QC}_{v+1}(b^{\ast})`$. Therefore,
 
 $$
 t_{\mathrm{qc}}\le t_2+d\le t_1+5d\lt\infty.
 $$
 
-По следствию леммы L5 первый честный вход в $`v+2`$ происходит в $`t_2`$. По следствию леммы L2 для каждого честного $`i`$ с расписанием эпохи, содержащей $`v+2`$, выполняется
+By the corollary to Lemma L5, the first honest entry into $`v+2`$ occurs at $`t_2`$. By the corollary to Lemma L2, for every honest node $`i`$ with a schedule for the epoch containing $`v+2`$,
 
 $$
 t_2+d\lt t_2+\mathrm{LT}+5d\lt D_i(v+2).
 $$
 
-Дедлайны более высоких view в той же эпохе ещё позже. Более поздняя эпоха начинается у честного узла не раньше $`t_2`$, поэтому её первый действующий дедлайн не раньше $`t_2+\tau\gt t_2+\mathrm{LT}+5d`$. Таким образом, доставка $`b^{\ast\ast}`$ всем честным завершается раньше любого честного таймаута view $`v+2`$ или выше.
+The deadlines of higher views in the same epoch are later still. A later epoch starts at an honest node no earlier than $`t_2`$, so its first active deadline is no earlier than $`t_2+\tau\gt t_2+\mathrm{LT}+5d`$. Thus, delivery of $`b^{\ast\ast}`$ to all honest nodes completes before any honest timeout of view $`v+2`$ or higher.
 
-Если честный узел при получении $`b^{\ast\ast}`$ ещё не выше $`v+2`$, вложенный QC переводит его в $`v+2`$ при необходимости. Обработка $`b^{\ast\ast}`$ видит родителя $`b^{\ast}`$ и два последовательных сертификата за $`b`$ и $`b^{\ast}`$, поэтому коммитит $`b`$.
+If an honest node is still at or below $`v+2`$ when it receives $`b^{\ast\ast}`$, the embedded QC moves it to $`v+2`$ if necessary. Processing $`b^{\ast\ast}`$ reveals the parent $`b^{\ast}`$ and two consecutive certificates for $`b`$ and $`b^{\ast}`$, so the node commits $`b`$.
 
-Если честный узел уже выше $`v+2`$ в момент $`t\le t_2+d`$, первый честный переход выше $`v+2`$ произошёл по $`\mathrm{QC}_{v+2}(b^{\ast\ast})`$. Таймауты исключены, а более высокий QC требует предшествующего честного перехода выше $`v+2`$.
+If an honest node is already above $`v+2`$ at a time $`t\le t_2+d`$, the first honest transition above $`v+2`$ occurred via $`\mathrm{QC}_{v+2}(b^{\ast\ast})`$. Timeouts are excluded, and a higher QC requires a preceding honest transition above $`v+2`$.
 
-Сам узел перешёл выше $`v+2`$ по некоторому $`\mathrm{QC}_q(x)`$, $`q\ge v+2`$. По лемме S5 цепочка блока $`x`$ содержит ребёнка $`b^{\ast}`$ с justify $`\mathrm{QC}_{v+1}(b^{\ast})`$. По предпосылке об `OnReceiveQC` эта цепочка проходит `Update` от предков к потомкам до перехода view, поэтому два последовательных сертификата за $`b`$ и $`b^{\ast}`$ вызывают коммит $`b`$ по правилу two-chain ещё до перехода выше $`v+2`$.
+The node itself moved above $`v+2`$ via some $`\mathrm{QC}_q(x)`$, $`q\ge v+2`$. By Lemma S5, the chain of block $`x`$ contains a child of $`b^{\ast}`$ with justify $`\mathrm{QC}_{v+1}(b^{\ast})`$. By the assumption on `OnReceiveQC`, this chain is processed by `Update` in ancestor-to-descendant order before the view transition, so the two consecutive certificates for $`b`$ and $`b^{\ast}`$ cause $`b`$ to be committed under the two-chain rule before the node moves above $`v+2`$.
 
-В обоих случаях каждый честный коммитит $`b`$ не позднее $`t_{\mathrm{qc}}`$. Подставляя оценки $`t_1`$ в $`t_{\mathrm{qc}}\le t_1+5d`$, получаем $`t_{\mathrm{qc}}\le t_0+9d`$ при входе $`L(v)`$ по $`\mathrm{QC}(v-1)`$ и $`t_{\mathrm{qc}}\le t_0+9d+\mathrm{LT}`$ при входе по таймауту или $`\mathrm{TC}`$. $`\square`$
+In both cases, every honest node commits $`b`$ no later than $`t_{\mathrm{qc}}`$. Substituting the bounds on $`t_1`$ into $`t_{\mathrm{qc}}\le t_1+5d`$ yields $`t_{\mathrm{qc}}\le t_0+9d`$ if $`L(v)`$ entered via $`\mathrm{QC}(v-1)`$, and $`t_{\mathrm{qc}}\le t_0+9d+\mathrm{LT}`$ if it entered via a timeout or a $`\mathrm{TC}`$. $`\square`$
 
-**Лемма L7 (о существовании commitView).** В каждой эпохе $`E`$, первый честный вход в которую произошёл после $`\mathrm{GST}`$, существует $`v\in E`$, являющийся $`\mathrm{commitView}`$.
+**Lemma L7 (existence of a commitView).** Every epoch $`E`$ whose first honest entry occurred after $`\mathrm{GST}`$ contains a $`v\in E`$ that is a $`\mathrm{commitView}`$.
 
-**Доказательство.** Рассмотрим первые $`n`$ view эпохи $`E`$ и для каждого из них тройку $`L(v),L(v+1),L(v+2)`$. Всего получаем $`n`$ троек. Последние тройки могут продолжаться в следующей эпохе, что допускается определением $`\mathrm{commitView}`$.
+**Proof.** Consider the first $`n`$ views of epoch $`E`$ and, for each of them, the triple $`L(v),L(v+1),L(v+2)`$. This gives $`n`$ triples in total. The final triples may extend into the next epoch, as allowed by the definition of $`\mathrm{commitView}`$.
 
-При round-robin каждый византийский узел входит не более чем в $`3`$ такие тройки — по одному разу на каждой позиции. Поэтому троек с хотя бы одним византийским лидером не более $`3f`$, а троек с тремя честными лидерами не меньше
+Under round-robin rotation, each Byzantine node appears in at most $`3`$ such triples, once in each position. Therefore, at most $`3f`$ triples contain at least one Byzantine leader, and the number of triples with three honest leaders is at least
 
 $$
 n-3f=(3f+1)-3f=1.
 $$
 
-Следовательно, существует $`v\in E`$, для которого $`L(v),L(v+1),L(v+2)\in H`$. Поскольку первый честный вход в $`E`$ произошёл после $`\mathrm{GST}`$, этот $`v`$ является $`\mathrm{commitView}`$. $`\square`$
+Therefore, there is a $`v\in E`$ such that $`L(v),L(v+1),L(v+2)\in H`$. Since the first honest entry into $`E`$ occurred after $`\mathrm{GST}`$, this $`v`$ is a $`\mathrm{commitView}`$. $`\square`$
 
-**Лемма L8 (о входе честного лидера во view).** Пусть $`v\in E`$, первый честный вход в эпоху $`E`$ произошёл после $`\mathrm{GST}`$, а $`l=L(v)\in H`$. Если в момент $`t^{\ast}`$ существует честный $`i`$ с $`V_i(t^{\ast})\gt v`$, то
+**Lemma L8 (entry of an honest leader into a view).** Suppose $`v\in E`$, the first honest entry into epoch $`E`$ occurred after $`\mathrm{GST}`$, and $`l=L(v)\in H`$. If, at time $`t^{\ast}`$, there is an honest node $`i`$ with $`V_i(t^{\ast})\gt v`$, then
 
 $$
 \exists t\lt t^{\ast}:\qquad V_l(t)=v.
 $$
 
-**Доказательство.** Предположим, что до $`t^{\ast}`$ лидер $`l`$ ни разу не входил в $`v`$. Пусть $`t'\le t^{\ast}`$ — момент первого честного перехода выше $`v`$, а $`v'=V_j(t')\gt v`$ — view, в который вошёл честный узел $`j`$.
+**Proof.** Suppose leader $`l`$ never entered $`v`$ before $`t^{\ast}`$. Let $`t'\le t^{\ast}`$ be the time of the first honest transition above $`v`$, and let $`v'=V_j(t')\gt v`$ be the view entered by honest node $`j`$.
 
-Покажем, что $`v'=v+1`$.
+We show that $`v'=v+1`$.
 
-1. При переходе по $`\mathrm{QC}(v'-1)`$ честный подписант находился в $`v'-1`$ раньше $`t'`$. Поэтому $`v'-1\le v`$.
-2. При переходе по таймауту $`v'-1`$ сам $`j`$ находился в $`v'-1`$ раньше $`t'`$. Для $`\mathrm{TC}(v')`$ в $`v'-1`$ находился честный отправитель $`\mathrm{Wish}(v')`$. Снова $`v'-1\le v`$.
+1. For a transition via $`\mathrm{QC}(v'-1)`$, an honest signer was in $`v'-1`$ before $`t'`$. Therefore, $`v'-1\le v`$.
+2. For a transition via a timeout of $`v'-1`$, node $`j`$ itself was in $`v'-1`$ before $`t'`$. For $`\mathrm{TC}(v')`$, an honest sender of $`\mathrm{Wish}(v')`$ was in $`v'-1`$. Again, $`v'-1\le v`$.
 
-Следовательно, $`v'=v+1`$. Рассмотрим переход в этот view.
+Therefore, $`v'=v+1`$. Consider the transition into this view.
 
-1. По $`\mathrm{QC}(v)`$. Честный $`l`$ предложил блок после входа в $`v`$, а сертификат собран позднее. Значит, лидер вошёл в $`v`$ раньше $`t'\le t^{\ast}`$. Противоречие.
-2. По таймауту $`v`$ или $`\mathrm{TC}(v+1)`$. В обоих случаях нужен честный таймаут $`v`$ у некоторого узла $`k`$, поэтому $`t'\ge D_k(v)`$. По лемме L1 лидер пересекает границу $`E`$ не позднее $`a_k+2d\lt D_k(v)\le t'`$. До $`t'`$ честные находятся не выше $`v`$, поэтому лидер запускает расписание $`E`$, а таймеры доводят его до $`v`$ не позднее $`a_l+(v-e)\tau`$. При этом
+1. Via $`\mathrm{QC}(v)`$. The honest leader $`l`$ proposed a block after entering $`v`$, and the certificate was assembled later. Thus, the leader entered $`v`$ before $`t'\le t^{\ast}`$. A contradiction.
+2. Via a timeout of $`v`$ or $`\mathrm{TC}(v+1)`$. Both cases require an honest timeout of $`v`$ at some node $`k`$, so $`t'\ge D_k(v)`$. By Lemma L1, the leader crosses the boundary of $`E`$ no later than $`a_k+2d\lt D_k(v)\le t'`$. Before $`t'`$, honest nodes are at or below $`v`$, so the leader starts the schedule for $`E`$, and the timers bring it to $`v`$ no later than $`a_l+(v-e)\tau`$. Moreover,
 
 $$
 a_l+(v-e)\tau
@@ -299,57 +299,57 @@ a_l+(v-e)\tau
 \lt D_k(v)\le t'.
 $$
 
-Следовательно, лидер вошёл в $`v`$ раньше $`t'\le t^{\ast}`$. Противоречие. $`\square`$
+Therefore, the leader entered $`v`$ before $`t'\le t^{\ast}`$. A contradiction. $`\square`$
 
-**Лемма L9 (о выходе из любой эпохи).** Для каждой эпохи существует конечный момент, к которому все честные находятся выше этой эпохи.
+**Lemma L9 (exit from any epoch).** For every epoch, there is a finite time by which all honest nodes are above that epoch.
 
 $$
 \forall E\;\exists T_E\ge\mathrm{GST}\;\forall i\in H:
 \qquad V_i(T_E)\gt r_E.
 $$
 
-Где $`r_E`$ — последний view эпохи $`E`$.
+Here, $`r_E`$ is the last view of epoch $`E`$.
 
-**Доказательство.** Пусть $`t_0=\mathrm{GST}`$, $`v_{\max}=\max_{i\in H}V_i(t_0)`$, $`E_{\max}`$ — эпоха, содержащая $`v_{\max}`$, а $`e_{\max}`$ — её первый view.
+**Proof.** Let $`t_0=\mathrm{GST}`$, $`v_{\max}=\max_{i\in H}V_i(t_0)`$, let $`E_{\max}`$ be the epoch containing $`v_{\max}`$, and let $`e_{\max}`$ be its first view.
 
-Если в момент $`t_0`$ есть честные узлы ниже $`e_{\max}`$, рассмотрим самое первое пересечение этой границы среди всех честных. Как в доказательстве леммы L1, оно произошло по $`\mathrm{TC}(e_{\max})`$ или $`\mathrm{QC}(e_{\max}-1)`$. Первый честный получатель разослал сертификат всем не позднее $`t_0=\mathrm{GST}`$, и все честные получат его не позднее $`t_0+d`$. Получатель может пересечь границу по более высокому QC ещё до доставки этого сертификата. Следовательно,
+If some honest nodes are below $`e_{\max}`$ at time $`t_0`$, consider the very first crossing of this boundary by any honest node. As in the proof of Lemma L1, it occurred via $`\mathrm{TC}(e_{\max})`$ or $`\mathrm{QC}(e_{\max}-1)`$. The first honest recipient broadcast the certificate to all nodes no later than $`t_0=\mathrm{GST}`$, and all honest nodes receive it no later than $`t_0+d`$. A recipient may cross the boundary via a higher QC before this certificate is delivered. Therefore,
 
 $$
 \forall i\in H:\qquad V_i(t_0+d)\ge e_{\max}.
 $$
 
-Пусть $`e_2`$ — первый view эпохи $`E_2=E_{\max}+1`$, а $`r=e_2-1`$. Предположим, честный узел $`k`$ никогда не выйдет из $`E_{\max}`$. Если хотя бы один честный пересечёт границу $`e_2`$, первый такой переход произойдёт после $`t_0`$. По лемме L1 все честные, включая $`k`$, пересекут её за следующие $`2d`$. Поэтому из нашего предположения следует, что ни один честный не пересечёт $`e_2`$.
+Let $`e_2`$ be the first view of epoch $`E_2=E_{\max}+1`$, and let $`r=e_2-1`$. Suppose an honest node $`k`$ never leaves $`E_{\max}`$. If any honest node crosses the boundary $`e_2`$, the first such transition occurs after $`t_0`$. By Lemma L1, all honest nodes, including $`k`$, cross it within the next $`2d`$. Thus, our assumption implies that no honest node crosses $`e_2`$.
 
-В частности, при этом предположении переход честного по QC во view не ниже $`e_2`$ невозможен. QC могут продвигать узлы внутри $`E_{\max}`$, а дедлайны заданы её расписанием.
+In particular, under this assumption, an honest transition via a QC to a view at least $`e_2`$ is impossible. QCs may advance nodes within $`E_{\max}`$, and the deadlines are determined by that epoch's schedule.
 
-В каждом view ниже $`r`$ узел либо раньше продвигается по QC, либо переходит по таймеру. Число view до $`r`$ конечно, поэтому каждый честный достигает $`r`$ и к своему дедлайну $`D_i(r)`$ отправляет $`\mathrm{Wish}(e_2)`$.
+In each view below $`r`$, a node either advances earlier via a QC or transitions via a timer. There are finitely many views before $`r`$, so every honest node reaches $`r`$ and sends $`\mathrm{Wish}(e_2)`$ by its deadline $`D_i(r)`$.
 
-Среди лидеров $`E_2`$ есть честный. За конечное время он получает не менее $`2f+1`$ честных Wish, включая отправленные до $`\mathrm{GST}`$, собирает $`\mathrm{TC}(e_2)`$ и входит в $`e_2`$. Это противоречит выведенному выше отсутствию честных переходов через $`e_2`$. Значит, все честные за конечное время выходят из $`E_{\max}`$.
+There is an honest leader among the leaders of $`E_2`$. In finite time, it receives at least $`2f+1`$ honest Wish messages, including those sent before $`\mathrm{GST}`$, assembles $`\mathrm{TC}(e_2)`$, and enters $`e_2`$. This contradicts the conclusion above that no honest node crosses $`e_2`$. Hence, all honest nodes leave $`E_{\max}`$ in finite time.
 
-Покажем, что некоторый честный побывает именно в $`e_2`$. Пусть $`v'`$ — минимальный достигнутый честными view не ниже $`e_2`$. Если $`v'\gt e_2`$, то при входе по $`\mathrm{QC}(v'-1)`$ или $`\mathrm{TC}(v')`$ честный подписант находился в $`v'-1`$, а при локальном таймауте там находился сам переходящий узел. Во всех случаях достигнут view $`e_2\le v'-1\lt v'`$, что противоречит минимальности $`v'`$. Поэтому $`v'=e_2`$.
+We show that some honest node visits $`e_2`$ itself. Let $`v'`$ be the smallest view reached by honest nodes that is at least $`e_2`$. If $`v'\gt e_2`$, then for entry via $`\mathrm{QC}(v'-1)`$ or $`\mathrm{TC}(v')`$, an honest signer was in $`v'-1`$; for entry via a local timeout, the transitioning node itself was in that view. In every case, a view $`e_2\le v'-1\lt v'`$ was reached, contradicting the minimality of $`v'`$. Therefore, $`v'=e_2`$.
 
-Первое честное пересечение границы $`E_2`$ происходит после $`\mathrm{GST}`$, и по лемме L1 все честные достигают view не ниже $`e_2`$ за следующие $`2d`$. Повторяя рассуждение о выходе для $`E_2,E_2+1,\ldots`$, получаем результат для любой последующей эпохи за конечное число шагов. Из эпох ниже $`E_{\max}`$ все честные уже вышли к $`t_0+d`$. $`\square`$
+The first honest crossing of the boundary of $`E_2`$ occurs after $`\mathrm{GST}`$, and by Lemma L1, all honest nodes reach a view at least $`e_2`$ within the next $`2d`$. Repeating the exit argument for $`E_2,E_2+1,\ldots`$ establishes the result for any subsequent epoch in finitely many steps. All honest nodes have already left epochs below $`E_{\max}`$ by $`t_0+d`$. $`\square`$
 
-**Теорема (liveness).**
+**Theorem (liveness).**
 
 $$
 \forall t\ge\mathrm{GST}\;\exists T\gt t:\qquad
 \min_{i\in H}h_i(T)\gt\max_{i\in H}h_i(t).
 $$
 
-Где $`h_i(t)`$ — высота последнего блока, закоммиченного честным узлом $`i`$ к моменту $`t`$.
+Here, $`h_i(t)`$ is the height of the last block committed by honest node $`i`$ by time $`t`$.
 
-**Доказательство.** Пусть $`t\ge\mathrm{GST}`$. Выберем эпоху $`E`$ с первым view $`e`$, удовлетворяющим
+**Proof.** Let $`t\ge\mathrm{GST}`$. Choose an epoch $`E`$ whose first view $`e`$ satisfies
 
 $$
 e\gt\max_{i\in H}V_i(t).
 $$
 
-По лемме L9 честные достигнут её и выйдут из неё за конечное время, причём первый вход произойдёт после $`t`$. По лемме L7 существует $`v\in E`$, являющийся $`\mathrm{commitView}`$. По лемме L9 некоторый честный окажется выше $`v`$, поэтому по лемме L8 лидер $`L(v)`$ войдёт в $`v`$ в момент $`s\gt t`$.
+By Lemma L9, honest nodes reach and leave it in finite time, and the first entry occurs after $`t`$. By Lemma L7, there is a $`v\in E`$ that is a $`\mathrm{commitView}`$. By Lemma L9, some honest node eventually moves above $`v`$, so by Lemma L8, leader $`L(v)`$ enters $`v`$ at a time $`s\gt t`$.
 
-По лемме L3 и её следствию таймауты $`v`$ наступят после $`s+\mathrm{LT}`$, а первый честный переход выше $`v`$ по QC требует предложения $`L(v)`$. Поэтому лидер предложит блок $`b`$ не позднее $`s+\mathrm{LT}`$.
+By Lemma L3 and its corollary, timeouts of $`v`$ occur after $`s+\mathrm{LT}`$, and the first honest transition above $`v`$ via a QC requires a proposal from $`L(v)`$. Therefore, the leader proposes a block $`b`$ no later than $`s+\mathrm{LT}`$.
 
-По лемме L6 все честные закоммитят $`b`$ после $`t`$ и не позднее некоторого конечного момента $`T\gt t`$. Новый коммит увеличивает закоммиченную высоту узла, поэтому $`\mathrm{height}(b)\gt h_i(t)`$ для каждого $`i\in H`$. Следовательно,
+By Lemma L6, all honest nodes commit $`b`$ after $`t`$ and no later than some finite time $`T\gt t`$. A new commit increases a node's committed height, so $`\mathrm{height}(b)\gt h_i(t)`$ for every $`i\in H`$. Therefore,
 
 $$
 \min_{i\in H}h_i(T)
@@ -357,4 +357,4 @@ $$
 \gt\max_{i\in H}h_i(t).
 $$
 
-Произвольность $`t`$ завершает доказательство. $`\square`$
+Since $`t`$ was arbitrary, the proof is complete. $`\square`$
