@@ -1,9 +1,9 @@
 use crate::simulator::adversary::{
     Adversary, DeliveryContext, DeliveryPolicy, Fate, Packet, Payload,
 };
-use crate::simulator::byzantine::{ByzantineContext, ByzantineProxy};
+use crate::simulator::byzantine::{ByzantineContext, ByzantineProxy, chained_proxy};
 use crate::simulator::clock::Timeline;
-use crate::simulator::rng::SharedRng;
+use crate::simulator::rng::Randomness;
 use crate::simulator::trace::{Snapshot, Trace, describe, node};
 use crate::simulator::viewer::NodeSnapshot;
 use anyhow::{Result, anyhow};
@@ -15,8 +15,7 @@ use hotstuff_consensus::mocks::timeouts::FixedPolicy;
 use hotstuff_consensus::network::message::{Message, Recipient};
 use hotstuff_consensus::protocol::driver::DriverInput;
 use hotstuff_consensus::protocol::leaders::RoundRobin;
-use hotstuff_consensus::protocol::pacemaker::Pacemaker;
-use hotstuff_consensus::sm::{Effects, NodeError, NodeState};
+use hotstuff_consensus::sm::{Effects, NodeState};
 use hotstuff_consensus::storage::ReadStorage;
 use hotstuff_consensus::storage::kv_storage::KVStorage;
 use hotstuff_consensus::timer::queue::TimerQueue;
@@ -113,6 +112,7 @@ pub struct Commit<CL> {
 }
 
 pub struct GlobalState<CS: ClockSource> {
+    committee_size: u32,
     nodes: BTreeMap<NodeID, Replica<CS>>,
     unstarted: BTreeMap<NodeID, Replica<CS>>,
     timeline: Timeline<CS::Clock>,
@@ -121,10 +121,61 @@ pub struct GlobalState<CS: ClockSource> {
     clock: CS,
     commits: BTreeMap<NodeID, Vec<Commit<CS::Clock>>>,
     view_timeouts: u64,
-    byzantine: BTreeSet<NodeID>,
+}
+
+pub struct Context<'a, CS: ClockSource> {
+    pub state: &'a GlobalState<CS>,
+    pub randomness: Randomness,
+    pub byzantine: &'a BTreeSet<NodeID>,
+}
+
+impl<CS: ClockSource> Context<'_, CS> {
+    pub fn honest_nodes(&self) -> impl Iterator<Item = NodeID> + '_ {
+        self.state.running().filter(|id| !self.is_byzantine(*id))
+    }
+
+    pub fn honest_unstarted(&self) -> impl Iterator<Item = NodeID> + '_ {
+        self.state
+            .unstarted
+            .keys()
+            .copied()
+            .filter(|id| !self.is_byzantine(*id))
+    }
+
+
+    pub fn is_byzantine(&self, node_id: NodeID) -> bool {
+        self.byzantine.contains(&node_id)
+    }
+
+    pub fn byzantine_nodes(&self) -> impl Iterator<Item = NodeID> + '_ {
+        self.byzantine.iter().copied()
+    }
+
+    pub fn honest_commit_logs(&self) -> impl Iterator<Item = (NodeID, &[Commit<CS::Clock>])> {
+        self.state
+            .commits
+            .iter()
+            .filter(|(id, _)| !self.is_byzantine(**id))
+            .map(|(id, log)| (*id, log.as_slice()))
+    }
+
+    pub fn honest_views(&self) -> impl Iterator<Item = (NodeID, View)> {
+        self.state
+            .nodes
+            .iter()
+            .filter(|(id, _)| !self.is_byzantine(**id))
+            .map(|(id, node)| {
+                let view = ReadStorage::<TestScheme, TestCommand>::get_cur_view(node.storage());
+                (*id, view.unwrap())
+            })
+    }
 }
 
 impl<CS: ClockSource> GlobalState<CS> {
+    pub fn committee_size(&self) -> u32 {
+        self.committee_size
+    }
+
     pub fn now(&self) -> CS::Clock {
         self.timeline.now()
     }
@@ -133,33 +184,8 @@ impl<CS: ClockSource> GlobalState<CS> {
         self.nodes.keys().copied()
     }
 
-    pub fn honest_nodes(&self) -> impl Iterator<Item = NodeID> + '_ {
-        self.running().filter(|id| !self.is_byzantine(*id))
-    }
-
-    pub fn is_byzantine(&self, node_id: NodeID) -> bool {
-        self.byzantine.contains(&node_id)
-    }
-
     pub fn replica(&self, node_id: NodeID) -> Option<&Replica<CS>> {
         self.nodes.get(&node_id)
-    }
-
-    pub fn honest_commit_logs(&self) -> impl Iterator<Item = (NodeID, &[Commit<CS::Clock>])> {
-        self.commits
-            .iter()
-            .filter(|(id, _)| !self.is_byzantine(**id))
-            .map(|(id, log)| (*id, log.as_slice()))
-    }
-
-    pub fn honest_views(&self) -> impl Iterator<Item = (NodeID, View)> {
-        self.nodes
-            .iter()
-            .filter(|(id, _)| !self.is_byzantine(**id))
-            .map(|(id, node)| {
-                let view = ReadStorage::<TestScheme, TestCommand>::get_cur_view(node.storage());
-                (*id, view.unwrap())
-            })
     }
 
     pub fn committed_height(&self, node_id: NodeID) -> u64 {
@@ -252,7 +278,7 @@ pub type Duration<CS> = <<CS as ClockSource>::Clock as Clock>::Duration;
 pub struct Simulator<CS: ClockSource> {
     state: GlobalState<CS>,
     trace: Option<Trace>,
-    rng: SharedRng,
+    pub rng: Randomness,
     next_message_id: u64,
 }
 
@@ -262,11 +288,11 @@ where
 {
     pub fn new(
         clock: CS,
+        committee_size: u32,
         nodes: BTreeMap<NodeID, Replica<CS>>,
         starts: BTreeMap<NodeID, CS::Clock>,
         stable_net_delay: Duration<CS>,
-        rng: SharedRng,
-        byzantine: BTreeSet<NodeID>,
+        rng: Randomness,
         trace: Option<Trace>,
     ) -> Self {
         let mut timeline = Timeline::new(clock.now());
@@ -276,6 +302,7 @@ where
         }
         let mut simulator = Self {
             state: GlobalState {
+                committee_size,
                 nodes: BTreeMap::new(),
                 unstarted: nodes,
                 timeline,
@@ -284,7 +311,6 @@ where
                 clock,
                 commits: BTreeMap::new(),
                 view_timeouts: 0,
-                byzantine,
             },
             trace,
             rng,
@@ -292,6 +318,50 @@ where
         };
         simulator.record_initial_state();
         simulator
+    }
+
+    pub fn context<'a>(&'a self, byzantine: &'a BTreeSet<NodeID>) -> Context<'a, CS> {
+        Context {
+            state: &self.state,
+            randomness: self.rng.clone(),
+            byzantine,
+        }
+    }
+
+    pub fn trace_behaviors<DP: DeliveryPolicy<CS>>(&mut self, adversary: &Adversary<CS, DP>) {
+        if let Some(trace) = &mut self.trace {
+            let byzantine = &adversary.byzantine_nodes;
+            let behaviors = byzantine
+                .iter()
+                .map(|id| {
+                    let names = adversary
+                        .byzantine
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .map(|proxy| proxy.name)
+                        .collect();
+                    (u32::from(*id), names)
+                })
+                .collect();
+            let mutations = adversary
+                .mutations
+                .iter()
+                .map(|(id, handlers)| {
+                    (
+                        u32::from(*id),
+                        handlers.iter().map(|proxy| proxy.name).collect(),
+                    )
+                })
+                .collect();
+            trace.viewer.set_behaviors(byzantine, behaviors, mutations);
+            let nodes: Vec<_> = byzantine.iter().copied().map(node).collect();
+            trace.note(format!("byzantine = [{}]", nodes.join(", ")));
+            if !adversary.mutations.is_empty() {
+                let nodes: Vec<_> = adversary.mutations.keys().copied().map(node).collect();
+                trace.note(format!("mutated = [{}]", nodes.join(", ")));
+            }
+        }
     }
 
     fn record_initial_state(&mut self) {
@@ -351,8 +421,7 @@ where
         &mut self,
         adversary: &mut Adversary<CS, DP>,
     ) -> Result<bool> {
-        let byzantine = &mut adversary.byzantine;
-        let Some((node_id, now, effects)) = self.advance_next_time(byzantine)? else {
+        let Some((node_id, now, effects)) = self.advance_next_time(adversary)? else {
             return Ok(false);
         };
         self.execute_effects(now, node_id, effects, &mut adversary.delivery)?;
@@ -398,9 +467,9 @@ where
         }
     }
 
-    fn advance_next_time(
+    fn advance_next_time<DP: DeliveryPolicy<CS>>(
         &mut self,
-        byzantine: &mut BTreeMap<NodeID, ByzantineProxy<CS>>,
+        adversary: &mut Adversary<CS, DP>,
     ) -> Result<
         Option<(
             NodeID,
@@ -461,14 +530,25 @@ where
             }
         };
 
-        let proxy = byzantine
-            .get_mut(&node_id)
-            .and_then(|proxy| (proxy.activate_when)(&self.state).then_some(proxy));
-        let byzantine_active = proxy.is_some();
-        let label = match &proxy {
-            Some(_) => label.map(|label| format!("{label} [byzantine]")),
-            None => label,
+        let mut executed_behaviors = Vec::new();
+        let handlers = if adversary.byzantine_nodes.contains(&node_id) {
+            adversary.byzantine.get_mut(&node_id)
+        } else {
+            adversary.mutations.get_mut(&node_id)
         };
+        let mut proxy = handlers
+            .filter(|proxies| !proxies.is_empty())
+            .map(|proxies| {
+                chained_proxy(proxies.iter_mut().collect(), |name| {
+                    if traced && !executed_behaviors.contains(&name) {
+                        executed_behaviors.push(name);
+                    }
+                })
+            })
+            .and_then(|mut proxy| {
+                let context = self.context(&adversary.byzantine_nodes);
+                (proxy.activate_when)(&context).then_some(proxy)
+            });
         let label = if self.state.nodes.contains_key(&node_id) {
             label
         } else if self.state.unstarted.contains_key(&node_id) {
@@ -481,23 +561,27 @@ where
                 replica.add_event_to_queue(input);
             }
         }
-        let effects = match proxy {
-            Some(proxy) => self.apply_byzantine(node_id, proxy)?,
+        let effects = match proxy.as_mut() {
+            Some(proxy) => self.apply_behavior(node_id, proxy)?,
             None => match self.state.nodes.get_mut(&node_id) {
                 Some(replica) => replica.apply()?,
                 None => no_effects(),
             },
         };
+        drop(proxy);
         if let Some(label) = label {
             let snapshot = self.snapshot(node_id);
             if let Some(trace) = &mut self.trace {
-                trace.step(now, node_id, &label, &effects, snapshot);
+                let trace_label = if executed_behaviors.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{label} [handlers: {}]", executed_behaviors.join(", "))
+                };
+                trace.step(now, node_id, &trace_label, &effects, snapshot);
                 trace.viewer.begin(now, Some(node_id), action, label);
+                trace.viewer.record_behaviors(executed_behaviors);
                 if let Some(id) = message_id {
                     trace.viewer.received(id);
-                }
-                if byzantine_active {
-                    trace.viewer.tag("faulty");
                 }
                 if !effects.sync.is_empty() {
                     trace.viewer.tag("sync");
@@ -528,15 +612,15 @@ where
         })
     }
 
-    fn apply_byzantine(
+    fn apply_behavior(
         &mut self,
         node_id: NodeID,
-        proxy: &mut ByzantineProxy<CS>,
+        proxy: &mut ByzantineProxy<'_, CS>,
     ) -> Result<NodeEffects<CS>> {
         let Some(mut replica) = self.state.nodes.remove(&node_id) else {
             return Ok(no_effects());
         };
-        let effects = Self::run_behavior(node_id, &mut replica, &self.state, proxy);
+        let effects = Self::run_behavior(node_id, &mut replica, &self.state, &self.rng, proxy);
         self.state.nodes.insert(node_id, replica);
         effects
     }
@@ -545,11 +629,12 @@ where
         node_id: NodeID,
         replica: &mut Replica<CS>,
         state: &GlobalState<CS>,
-        proxy: &mut ByzantineProxy<CS>,
+        randomness: &Randomness,
+        proxy: &mut ByzantineProxy<'_, CS>,
     ) -> Result<NodeEffects<CS>> {
         let mut effects = no_effects();
         while let Some(input) = replica.pop_input() {
-            let mut context = ByzantineContext::new(node_id, replica, state);
+            let mut context = ByzantineContext::new(node_id, replica, state, randomness.clone());
             merge(&mut effects, (proxy.behavior)(&mut context, input)?);
         }
         Ok(effects)

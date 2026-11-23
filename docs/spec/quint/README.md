@@ -56,11 +56,17 @@ Renders the trace as markdown:
 
 - **Summary** — when each new QC appeared, when nodes committed, final views and committed chains.
 - **Step N** — the action taken on the step and the state of every correct node after it
-  (pacemaker, consensus, pending proposals, timers, queue) plus the network; changed values are in bold.
+  (pacemaker, consensus, inputs buffered by view and block, timers, queue) plus the network; changed values are in bold.
 
 `--from` / `--to` select the steps that are rendered in detail; the summary always covers the whole trace.
 
 ### Visualize trace
+
+    python3 tools/viz.py trace.itf.json --serve --step 200
+
+`--serve` opens the interactive viewer with the trace loaded over local HTTP. It binds to `127.0.0.1`
+on a free port; use `--port 8000` to select one. The server serves only this trace snapshot and runs
+until `Ctrl+C`. This also accepts JSON traces from the Rust simulator.
 
     python3 tools/viz.py trace.itf.json --html trace.html --shiviz trace.shiviz.log --dot blocks.dot --step 200
 

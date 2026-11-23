@@ -1,3 +1,5 @@
+#![expect(dead_code, reason = "Scenario helpers need not all be used by the current tests")]
+
 mod clock;
 mod rng;
 mod simulator;

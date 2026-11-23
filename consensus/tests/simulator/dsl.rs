@@ -1,6 +1,6 @@
-use crate::simulator::rng::{SharedRng, SplitMix64};
-use crate::simulator::simulator::{GlobalState, ManualClock, Simulator};
-use crate::simulator::trace::{Trace, node, record_violation};
+use crate::simulator::rng::{Randomness, SplitMix64};
+use crate::simulator::simulator::{Context, GlobalState, ManualClock, Simulator};
+use crate::simulator::trace::{Trace, node, record_violation, with_name};
 use anyhow::{Context as _, Result, bail};
 use hotstuff_consensus::mocks::genesis::genesis_config;
 use hotstuff_consensus::mocks::kv::MemoryKV;
@@ -21,6 +21,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type Sim = Simulator<VirtualClock>;
 pub type State = GlobalState<VirtualClock>;
+
+#[derive(Clone, Copy, Debug)]
+pub enum NodeSelector {
+    Id(NodeID),
+    All,
+    Range(u32),
+}
+
+pub fn with_probability<CS: ClockSource>(percent: u64) -> impl FnMut(&Context<'_, CS>) -> bool {
+    assert!(
+        percent <= 100,
+        "probability must be between 0 and 100 percent"
+    );
+    move |ctx| ctx.randomness.chance(percent)
+}
 
 const COMMAND_SPACE: u64 = 1_000_000;
 
@@ -44,11 +59,10 @@ impl ManualClock for VirtualClock {
 pub struct Setup {
     n: u32,
     crashed: BTreeSet<NodeID>,
-    byzantine: BTreeSet<NodeID>,
     view_timeout: u64,
     lock_timeout: u64,
     delay: u64,
-    rng: SharedRng,
+    rng: Randomness,
     verbose: bool,
     starts: BTreeMap<NodeID, u64>,
     stagger: Option<(u64, u64)>,
@@ -59,11 +73,10 @@ impl Setup {
         Self {
             n,
             crashed: BTreeSet::new(),
-            byzantine: BTreeSet::new(),
             view_timeout: 100,
             lock_timeout: 30,
             delay: 10,
-            rng: SharedRng::new(0),
+            rng: Randomness::new(0),
             verbose: false,
             starts: BTreeMap::new(),
             stagger: None,
@@ -72,11 +85,6 @@ impl Setup {
 
     pub fn crashed(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
         self.crashed.extend(ids.into_iter().map(NodeID::from));
-        self
-    }
-
-    pub fn byzantine(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
-        self.byzantine.extend(ids.into_iter().map(NodeID::from));
         self
     }
 
@@ -91,7 +99,7 @@ impl Setup {
         self
     }
 
-    pub fn rng(mut self, rng: SharedRng) -> Self {
+    pub fn rng(mut self, rng: Randomness) -> Self {
         self.rng = rng;
         self
     }
@@ -107,7 +115,7 @@ impl Setup {
         self
     }
 
-    pub fn start_in_interval(self, rng: &SharedRng, start: u64, end: u64) -> Self {
+    pub fn start_in_interval(self, rng: &Randomness, start: u64, end: u64) -> Self {
         let n = self.n;
         self.start_at((0..n).map(|id| (id, rng.range(start, end))))
     }
@@ -156,56 +164,51 @@ impl Setup {
                     &self.describe(&starts),
                     self.n,
                     self.rng.seed(),
-                    &self.byzantine,
                     &self.crashed,
                 )
             })
             .transpose()?;
         Ok(Simulator::new(
             clock,
+            self.n,
             nodes,
             starts,
             self.delay,
             self.rng.clone(),
-            self.byzantine.clone(),
             trace,
         ))
     }
 
     fn describe(&self, starts: &BTreeMap<NodeID, u64>) -> String {
         let crashed: Vec<String> = self.crashed.iter().copied().map(node).collect();
-        let byzantine: Vec<String> = self.byzantine.iter().copied().map(node).collect();
         let starts: Vec<String> = (0..self.n)
             .map(NodeID::from)
             .filter(|id| !self.crashed.contains(id))
             .map(|id| format!("{}@{}", node(id), starts.get(&id).copied().unwrap_or(0)))
             .collect();
         format!(
-            "n = {}, Δ = {}, view timeout = {}, lock timeout = {}, crashed = [{}], byzantine = [{}], starts = [{}], seed = {}",
+            "n = {}, Δ = {}, view timeout = {}, lock timeout = {}, crashed = [{}], starts = [{}], seed = {}",
             self.n,
             self.delay,
             self.view_timeout,
             self.lock_timeout,
             crashed.join(", "),
-            byzantine.join(", "),
             starts.join(", "),
             self.rng.seed()
         )
     }
 }
 
-pub fn min_committed_height(state: &State) -> u64 {
-    state
-        .honest_nodes()
-        .map(|id| state.committed_height(id))
+pub fn min_committed_height(ctx: &Context<'_, VirtualClock>) -> u64 {
+    ctx.honest_nodes()
+        .map(|id| ctx.state.committed_height(id))
         .min()
         .unwrap_or(0)
 }
 
-pub fn max_committed_height(state: &State) -> u64 {
-    state
-        .honest_nodes()
-        .map(|id| state.committed_height(id))
+pub fn max_committed_height(ctx: &Context<'_, VirtualClock>) -> u64 {
+    ctx.honest_nodes()
+        .map(|id| ctx.state.committed_height(id))
         .max()
         .unwrap_or(0)
 }
@@ -225,29 +228,26 @@ pub fn committed_proposers(state: &State, id: NodeID) -> Result<BTreeSet<NodeID>
     Ok(proposers)
 }
 
-pub fn min_view(state: &State) -> View {
-    state
-        .honest_views()
-        .map(|(_, view)| view)
-        .min()
-        .unwrap_or(0)
+pub fn min_view(ctx: &Context<'_, VirtualClock>) -> View {
+    ctx.honest_views().map(|(_, view)| view).min().unwrap_or(0)
 }
 
-pub fn max_view(state: &State) -> View {
-    state
-        .honest_views()
-        .map(|(_, view)| view)
-        .max()
-        .unwrap_or(0)
+pub fn max_view(ctx: &Context<'_, VirtualClock>) -> View {
+    ctx.honest_views().map(|(_, view)| view).max().unwrap_or(0)
 }
 
-pub fn time_reached(time: u64) -> impl Fn(&State) -> bool {
-    move |state| state.next_time().is_none_or(|at| at > time)
+pub fn time_reached(time: u64) -> impl Fn(&Context<'_, VirtualClock>) -> bool {
+    move |ctx| ctx.state.next_time().is_none_or(|at| at > time)
 }
 
 pub fn random_seeds(count: usize) -> Vec<u64> {
     let mut rng = SplitMix64::new(0);
     (0..count).map(|_| rng.next_u64()).collect()
+}
+
+/// Pass the scenario function directly so its name is available for the trace.
+pub fn replay(seed: u64, scenario: impl FnOnce(u64, bool) -> Result<()>) -> Result<()> {
+    with_name(std::any::type_name_of_val(&scenario), || scenario(seed, true))
 }
 
 pub fn for_each_seed(seeds: &[u64], test: impl Fn(u64, bool) -> Result<()>) -> Result<()> {

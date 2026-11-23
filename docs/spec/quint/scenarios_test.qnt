@@ -6,6 +6,7 @@ module scenariosTest {
   import state_machine.* from "./sm"
   import pacemaker.* from "./pacemaker"
   import invariants.* from "./invariants"
+  import blocksync.* from "./blocksync"
   import main(committee_size = 4, FAULTY = Set(0), BYZANTINE = Set(), MAX_VIEW = 6, FAULTY_PERCENT = 0, TIMER_PERCENT = 0).* from "./main"
 
   action unchanged: bool = all {
@@ -46,7 +47,7 @@ module scenariosTest {
       .then(step_until_proposed(3, v)).expect(safety_inv)
 
   // Upper bound on rounds for one view on the happy path. The busiest node is the next leader:
-  // it handles the proposal, at most committee_size votes and its EnterView, one event per step,
+  // it handles the proposal, at most committee_size votes and the resulting NewQC, one event per step,
   // and may lag one round behind each sender. Rounds after the stop condition are no-ops,
   // so the bound only has to be large enough.
   pure val MAX_ROUNDS_PER_VIEW = 2 * committee_size + 2
@@ -79,6 +80,107 @@ module scenariosTest {
   // n0 is faulty and silent; views 1, 2 and 3 have correct leaders n1, n2 and n3.
   run happyPathTest =
     init.then(happy_until(3))
+
+  run epochBoundaryWaitsForTcTest =
+    val initial = init_pacemaker(1, GENESIS_QC)
+    val at1 = apply_pacemaker(initial, ViewTimerExpired(0))
+    val at2 = apply_pacemaker(at1.pacemaker, ViewTimerExpired(1))
+    val at3 = apply_pacemaker(at2.pacemaker, ViewTimerExpired(2))
+    val waiting = apply_pacemaker(at3.pacemaker, ViewTimerExpired(3))
+    val repeated = apply_pacemaker(waiting.pacemaker, ViewTimerExpired(3))
+    val tc = { certificate: { signature: QuorumCert(CORRECT) }, view: 4 }
+    val entered = apply_pacemaker(waiting.pacemaker, ReceivedTC(tc))
+    all {
+      at1.pacemaker.cur_view == 1,
+      1.to(3).forall(v => at1.effects.select(effect => effect == Timer(SetViewTimer(v))).length() == 1),
+      at2.pacemaker.cur_view == 2,
+      at2.pacemaker.sent_wish == Set(),
+      at3.pacemaker.cur_view == 3,
+      at3.pacemaker.sent_wish == Set(),
+      waiting.pacemaker.cur_view == 3,
+      waiting.pacemaker.sent_wish == Set(4),
+      waiting.effects == send_to_each(NODES, WishMsg(4)),
+      repeated.effects == [],
+      entered.pacemaker.cur_view == 4,
+      entered.pacemaker.scheduled_epoch == Some(1),
+      entered.effects.select(effect => effect == send_to(All, TCMsg(tc))).length() == 1,
+      4.to(7).forall(v => entered.effects.select(effect => effect == Timer(SetViewTimer(v))).length() == 1),
+    }
+
+  pure val EPOCH_BOUNDARY_QC: CertifiedBlock = {
+    certificate: { signature: QuorumCert(CORRECT) },
+    block: block_hash(3, 3),
+    view: 3,
+  }
+
+  run epochQcRelayedOnceTest =
+    val qc2 = EPOCH_BOUNDARY_QC.with("view", 2).with("block", block_hash(2, 2))
+    val at3 = apply_pacemaker(init_pacemaker(1, GENESIS_QC), ReceivedQC(qc2))
+    val entered = apply_pacemaker(at3.pacemaker, ReceivedQC(EPOCH_BOUNDARY_QC))
+    val repeated = apply_pacemaker(entered.pacemaker, ReceivedQC(EPOCH_BOUNDARY_QC))
+    all {
+      at3.pacemaker.cur_view == 3,
+      entered.pacemaker.cur_view == 4,
+      entered.pacemaker.high_qc == EPOCH_BOUNDARY_QC,
+      entered.pacemaker.scheduled_epoch == Some(1),
+      entered.effects.head() == send_to(All, QCMsg(EPOCH_BOUNDARY_QC)),
+      entered.effects.select(effect => effect == send_to(All, QCMsg(EPOCH_BOUNDARY_QC))).length() == 1,
+      4.to(7).forall(v => entered.effects.select(effect => effect == Timer(SetViewTimer(v))).length() == 1),
+      repeated == pacemaker_no_change(entered.pacemaker),
+    }
+
+  run qcInsideEpochIsNotRelayedTest =
+    val qc2 = EPOCH_BOUNDARY_QC.with("view", 2).with("block", block_hash(2, 2))
+    val qc5 = EPOCH_BOUNDARY_QC.with("view", 5).with("block", block_hash(5, 1))
+    val at3 = apply_pacemaker(init_pacemaker(1, GENESIS_QC), ReceivedQC(qc2))
+    val at6 = apply_pacemaker(at3.pacemaker, ReceivedQC(qc5))
+    all {
+      at3.pacemaker.cur_view == 3,
+      at3.effects.select(effect => effect == send_to(All, QCMsg(qc2))).length() == 0,
+      at6.pacemaker.cur_view == 6,
+      at6.pacemaker.scheduled_epoch == Some(1),
+      at6.effects.select(effect => effect == send_to(All, QCMsg(qc5))).length() == 0,
+    }
+
+  run epochQcAfterTcIsNotRelayedTest =
+    val tc = { certificate: { signature: QuorumCert(CORRECT) }, view: 4 }
+    val entered = apply_pacemaker(init_pacemaker(1, GENESIS_QC), ReceivedTC(tc))
+    val received = apply_pacemaker(entered.pacemaker, ReceivedQC(EPOCH_BOUNDARY_QC))
+    all {
+      received.pacemaker.cur_view == 4,
+      received.pacemaker.high_qc == EPOCH_BOUNDARY_QC,
+      received.effects == [],
+      received.out == NoPacemakerOutput,
+    }
+
+  run invalidEpochQcIsIgnoredTest =
+    val initial = init_pacemaker(1, GENESIS_QC)
+    Set(InvalidCert, QuorumCert(Set(1, 2))).forall(signature =>
+      val invalid = EPOCH_BOUNDARY_QC.with("certificate", { signature: signature })
+      apply_pacemaker(initial, ReceivedQC(invalid)) == pacemaker_no_change(initial))
+
+  // The faulty collector n0 reveals QC(3) only to n1 after receiving all honest votes.
+  // Honest nodes relay the QC and enter view 4 through message delivery alone.
+  run epochQcReachesAllHonestNodesTest =
+    val vote = VoteMsg({ view: EPOCH_BOUNDARY_QC.view, block: EPOCH_BOUNDARY_QC.block })
+    val message = QCMsg(EPOCH_BOUNDARY_QC)
+    init
+      .then(happy_until(3))
+      .then(checked_step(1))
+      .then(checked_step(2))
+      .then(checked_step(3))
+      .expect(CORRECT.forall(id => view_of(id) == 3 and voted_of(id) == 3))
+      .expect(CORRECT.forall(id => net.inbox.get(0).select(packet => packet == { sender: id, msg: vote }).length() == 1))
+      .then(inject(1, { sender: 0, msg: message }))
+      .then(checked_step(1))
+      .expect(view_of(1) == 4 and view_of(2) == 3 and view_of(3) == 3)
+      .expect(Set(2, 3).forall(id => net.inbox.get(id).select(packet => packet == { sender: 1, msg: message }).length() == 1))
+      .then(checked_step(2))
+      .then(checked_step(3))
+      .expect(CORRECT.forall(id => view_of(id) == 4 and high_qc_of(id) == EPOCH_BOUNDARY_QC))
+      // Drain self-delivery and duplicates to check that rebroadcasting terminates.
+      .then(CORRECT.size().reps(_ => checked_step(1).then(checked_step(2)).then(checked_step(3))))
+      .expect(CORRECT.forall(id => not(has_messages(id)) and view_of(id) == 4))
 
   def proposal(proposer: NodeID, version: int, view: View, justify: CertifiedBlock): Proposal =
     {
@@ -151,6 +253,134 @@ module scenariosTest {
   def stored(id: NodeID, hash: Hash): bool =
     nodes.get(id).kv.block_by_hash.keys().contains(hash)
 
+  pure val SYNC_BLOCK_1 = create_leaf(block_hash(1, 1), GENESIS.hash, GENESIS_QC, 1)
+  pure val SYNC_QC_1: CertifiedBlock = {
+    certificate: { signature: QuorumCert(CORRECT) }, block: SYNC_BLOCK_1.hash, view: 1
+  }
+  pure val SYNC_BLOCK_2 = create_leaf(block_hash(2, 2), SYNC_BLOCK_1.hash, SYNC_QC_1, 2)
+  pure val SYNC_QC_2: CertifiedBlock = {
+    certificate: { signature: QuorumCert(CORRECT) }, block: SYNC_BLOCK_2.hash, view: 2
+  }
+  pure val SYNC_BLOCK_3 = create_leaf(block_hash(3, 3), SYNC_BLOCK_2.hash, SYNC_QC_2, 3)
+  pure val SYNC_SOURCE = Map(
+    GENESIS.hash -> GENESIS,
+    SYNC_BLOCK_1.hash -> SYNC_BLOCK_1,
+    SYNC_BLOCK_2.hash -> SYNC_BLOCK_2,
+    SYNC_BLOCK_3.hash -> SYNC_BLOCK_3
+  )
+
+  // QC(3) must wait for the full chain, including when a TC already moved us to view 8.
+  run qcChainIsProcessedBeforeAdvanceTest =
+    Set(0, 8).forall(view =>
+      val initial = init_node(1)
+      val started =
+        if (view == 0) driver_no_change(initial.driver, initial.kv)
+        else apply_driver(initial.driver, initial.kv, NewTC({
+          certificate: { signature: QuorumCert(CORRECT) }, view: view
+        }))
+      val input = NewQC(EPOCH_BOUNDARY_QC)
+      val waiting = apply_driver(started.driver, started.kv, input)
+      val fetched = serve_requests({ requested: Set(SYNC_BLOCK_3.hash) }, waiting.kv, SYNC_SOURCE)
+      val processed = fetched.inputs.foldl(waiting, (acc, event) => apply_driver(acc.driver, acc.kv, event))
+      val resumed = apply_driver(processed.driver, processed.kv, input)
+      all {
+        waiting.driver.pacemaker.cur_view == view,
+        waiting.driver.pacemaker.high_qc == GENESIS_QC,
+        waiting.driver.consensus.exec_height == 0,
+        waiting.sync == [SYNC_BLOCK_3.hash],
+        waiting.driver.keeper.by_block.get(SYNC_BLOCK_3.hash) == [input],
+        fetched.inputs == [BlockSynced(SYNC_BLOCK_1), BlockSynced(SYNC_BLOCK_2), BlockSynced(SYNC_BLOCK_3)],
+        processed.driver.pacemaker.cur_view == (if (view == 0) 3 else view),
+        processed.driver.pacemaker.high_qc == SYNC_QC_2,
+        processed.driver.consensus.exec_hash == SYNC_BLOCK_1.hash,
+        processed.kv.committed_branch == [SYNC_BLOCK_1],
+        processed.replay == [input],
+        processed.driver.keeper.by_block.keys() == Set(),
+        resumed.driver.pacemaker.cur_view == (if (view == 0) 4 else view),
+        resumed.driver.pacemaker.high_qc == EPOCH_BOUNDARY_QC,
+        resumed.kv.committed_branch == [SYNC_BLOCK_1],
+        apply_driver(resumed.driver, resumed.kv, input) == driver_no_change(resumed.driver, resumed.kv),
+      })
+
+  run statusWaitsForBlockTest =
+    val initial = init_node(0)
+    val started = apply_driver(initial.driver, initial.kv, NewTC({
+      certificate: { signature: QuorumCert(CORRECT) }, view: 4
+    }))
+    val input = NewStatus({ sender: 2, qc: SYNC_QC_2, view: 4 })
+    val waiting = apply_driver(started.driver, started.kv, input)
+    val fetched = serve_requests({ requested: Set(SYNC_BLOCK_2.hash) }, waiting.kv, SYNC_SOURCE)
+    val processed = fetched.inputs.foldl(waiting, (acc, event) => apply_driver(acc.driver, acc.kv, event))
+    val resumed = apply_driver(processed.driver, processed.kv, input)
+    all {
+      waiting.driver.pacemaker.cur_view == 4,
+      waiting.driver.pacemaker.high_qc == GENESIS_QC,
+      waiting.sync == [SYNC_BLOCK_2.hash],
+      waiting.driver.keeper.by_block.get(SYNC_BLOCK_2.hash) == [input],
+      processed.replay == [input],
+      processed.driver.keeper.by_block.keys() == Set(),
+      resumed.driver.pacemaker.cur_view == 4,
+      resumed.driver.pacemaker.high_qc == SYNC_QC_2,
+      resumed.kv.block_by_hash.get(SYNC_BLOCK_2.hash) == SYNC_BLOCK_2,
+    }
+
+  // The new QC can certify another branch rooted at an already processed ancestor.
+  run qcOnAnotherBranchUsesStoredAncestorTest =
+    val initial = init_node(1)
+    val first = apply_driver(initial.driver, initial.kv, BlockSynced(SYNC_BLOCK_1))
+    val second = apply_driver(first.driver, first.kv, BlockSynced(SYNC_BLOCK_2))
+    val known = apply_driver(second.driver, second.kv, NewQC(SYNC_QC_2))
+    val fork = create_leaf(block_variant_hash(3, 3, 1), SYNC_BLOCK_1.hash, SYNC_QC_1, 2)
+    val qc = EPOCH_BOUNDARY_QC.with("block", fork.hash)
+    val waiting = apply_driver(known.driver, known.kv, NewQC(qc))
+    val fetched = serve_requests({ requested: Set(fork.hash) }, waiting.kv, SYNC_SOURCE.put(fork.hash, fork))
+    val processed = apply_driver(waiting.driver, waiting.kv, BlockSynced(fork))
+    val resumed = apply_driver(processed.driver, processed.kv, NewQC(qc))
+    all {
+      waiting.driver.pacemaker.high_qc == SYNC_QC_2,
+      waiting.sync == [fork.hash],
+      fetched.inputs == [BlockSynced(fork)],
+      processed.replay == [NewQC(qc)],
+      resumed.driver.pacemaker.high_qc == qc,
+      resumed.driver.pacemaker.cur_view == 4,
+      resumed.kv.block_by_hash.keys().contains(SYNC_BLOCK_2.hash),
+      resumed.kv.block_by_hash.keys().contains(fork.hash),
+    }
+
+  // A proposal can supply a block while the QC is waiting for blocksync.
+  run proposalReleasesBufferedQcTest =
+    val initial = init_node(3)
+    val started = apply_driver(initial.driver, initial.kv, ViewTimerFired(0))
+    val input = NewQC(SYNC_QC_1)
+    val waiting = apply_driver(started.driver, started.kv, input)
+    val received = apply_driver(waiting.driver, waiting.kv, NewProposal({
+      sender: 1, proposal: { block: SYNC_BLOCK_1, view: 1 }
+    }))
+    val resumed = apply_driver(received.driver, received.kv, input)
+    all {
+      waiting.sync == [SYNC_BLOCK_1.hash],
+      received.driver.consensus.voted_view == 1,
+      received.kv.block_by_hash.get(SYNC_BLOCK_1.hash) == SYNC_BLOCK_1,
+      received.driver.keeper.by_block.keys() == Set(),
+      received.replay == [input],
+      resumed.driver.pacemaker.cur_view == 2,
+      resumed.driver.pacemaker.high_qc == SYNC_QC_1,
+    }
+
+  run invalidInputsDoNotRequestBlocksTest =
+    val initial = init_node(0)
+    val invalid = SYNC_QC_1.with("certificate", { signature: InvalidCert })
+    Set(
+      NewQC(invalid),
+      NewStatus({ sender: 1, qc: invalid, view: 4 }),
+      NewStatus({ sender: 1, qc: SYNC_QC_1, view: 3 }),
+      NewProposal({ sender: 0, proposal: { block: SYNC_BLOCK_2, view: 2 } }),
+      NewProposal({ sender: 2, proposal: { block: SYNC_BLOCK_2.with("justify", invalid), view: 2 } }),
+      NewProposal({ sender: 2, proposal: { block: SYNC_BLOCK_2.with("parent", 999), view: 2 } }),
+      BlockSynced(SYNC_BLOCK_2),
+      BlockSynced(SYNC_BLOCK_1.with("height", 2))
+    ).forall(input => apply_driver(initial.driver, initial.kv, input) == driver_no_change(initial.driver, initial.kv))
+
   run orphanProposalVotesAfterSyncTest =
     val h1 = block_hash(1, 1)
     val h2 = block_hash(2, 2)
@@ -160,18 +390,22 @@ module scenariosTest {
       .expect(leader_finished(2))
       .then(inject(3, { sender: 2, msg: ProposalMsg(proposal(2, 0, 2, high_qc_of(2))) }))
       .then(2.reps(_ => checked_step(3)))
-      .expect(view_of(3) == 2)
+      .expect(view_of(3) == 1)
+      .expect(high_qc_of(3) == GENESIS_QC)
       .expect(voted_of(3) == 0)
       .expect(not(stored(3, h1)))
       .expect(not(stored(3, h2)))
       .expect(has_sync_requests(3))
-      .expect(nodes.get(3).driver.orphans.keys() == Set(h1))
+      .expect(nodes.get(3).driver.keeper.by_block.keys() == Set(h1))
       .then(sync_step(3))
       .then(checked_step(3))
       .expect(stored(3, h1))
+      .expect(view_of(3) == 1)
+      .then(checked_step(3))
       .expect(stored(3, h2))
+      .expect(view_of(3) == 2)
       .expect(voted_of(3) == 2)
-      .expect(nodes.get(3).driver.orphans.keys() == Set())
+      .expect(nodes.get(3).driver.keeper.by_block.keys() == Set())
 
   run leaderProposesAfterSyncTest =
     val h1 = block_hash(1, 1)
@@ -181,17 +415,24 @@ module scenariosTest {
       .then(inject(2, vote_packet(0, 1, h1)))
       .then(inject(2, vote_packet(1, 1, h1)))
       .then(inject(2, vote_packet(3, 1, h1)))
-      .then(4.reps(_ => checked_step(2)))
-      .expect(view_of(2) == 2)
-      .expect(high_qc_of(2).view == 1)
+      .then(5.reps(_ => checked_step(2)))
+      .expect(nodes.get(2).driver.keeper.by_block.get(h1) == [NewQC({
+        certificate: { signature: QuorumCert(Set(0, 1, 3)) }, block: h1, view: 1
+      })])
+      .expect(view_of(2) == 1)
+      .expect(high_qc_of(2) == GENESIS_QC)
       .expect(not(stored(2, h1)))
       .expect(not(leader_finished(2)))
       .expect(has_sync_requests(2))
-      .expect(nodes.get(2).driver.orphans.keys() == Set(h1))
+      .expect(nodes.get(2).driver.keeper.by_block.keys() == Set(h1))
       .then(sync_step(2))
       .then(checked_step(2))
       .expect(stored(2, h1))
+      .expect(not(leader_finished(2)))
+      .then(checked_step(2))
+      .expect(view_of(2) == 2)
+      .expect(high_qc_of(2).view == 1)
       .expect(leader_finished(2))
-      .expect(nodes.get(2).driver.orphans.keys() == Set())
+      .expect(nodes.get(2).driver.keeper.by_block.keys() == Set())
       .expect(net.inbox.get(3).select(p => p.msg == ProposalMsg(proposal(2, 0, 2, high_qc_of(2)))).length() == 1)
 }

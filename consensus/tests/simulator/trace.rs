@@ -7,19 +7,33 @@ use hotstuff_consensus::types::EpochTimeouts;
 use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::clock::Clock;
 use hotstuff_types::node::NodeID;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const TRACE_DIR: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/traces");
 const LANES_HEADER: &str = "## Lanes";
 
 thread_local! {
+    static NAME: Cell<Option<&'static str>> = const { Cell::new(None) };
     static RUNS: RefCell<BTreeMap<String, usize>> = const { RefCell::new(BTreeMap::new()) };
     static LAST: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+pub fn with_name<T>(name: &'static str, run: impl FnOnce() -> T) -> T {
+    struct RestoreName(Option<&'static str>);
+
+    impl Drop for RestoreName {
+        fn drop(&mut self) {
+            NAME.set(self.0);
+        }
+    }
+
+    let _restore = RestoreName(NAME.replace(Some(name)));
+    run()
 }
 
 pub struct Trace {
@@ -70,18 +84,13 @@ impl Snapshot {
 }
 
 impl Trace {
-    pub fn create(
-        setup: &str,
-        n: u32,
-        seed: u64,
-        byzantine: &BTreeSet<NodeID>,
-        crashed: &BTreeSet<NodeID>,
-    ) -> io::Result<Self> {
-        let test = std::thread::current()
-            .name()
+    pub fn create(setup: &str, n: u32, seed: u64, crashed: &BTreeSet<NodeID>) -> io::Result<Self> {
+        let thread = std::thread::current();
+        let test = NAME
+            .get()
+            .or_else(|| thread.name())
             .and_then(|name| name.rsplit("::").next())
-            .unwrap_or("trace")
-            .to_owned();
+            .unwrap_or("trace");
         let name = format!("{test}-{seed}");
         let run = RUNS.with_borrow_mut(|runs| {
             let count = runs.entry(name.clone()).or_insert(0);
@@ -101,7 +110,7 @@ impl Trace {
             head: format!("# {title}\n\n{setup}\n\n"),
             notes: Vec::new(),
             lanes: Lanes::new(n),
-            viewer: ViewerTrace::new(&title, setup, n, byzantine, crashed),
+            viewer: ViewerTrace::new(&title, setup, n, crashed),
         })
     }
 
@@ -142,7 +151,17 @@ impl Drop for Trace {
     fn drop(&mut self) {
         if let Err(err) = self.write() {
             eprintln!("trace: failed to write {}: {err}", self.path.display());
+            return;
         }
+        let quote =
+            |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+        let viz = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/spec/quint/tools/viz.py");
+        let json = self.path.with_extension("json");
+        eprintln!(
+            "Open trace:\npython3 {} {} --serve",
+            quote(&viz),
+            quote(&json),
+        );
     }
 }
 
@@ -281,5 +300,6 @@ pub fn describe(msg: &Message<TestScheme, TestCommand>) -> String {
         Message::WishMsg(wish) => format!("Wish(v{})", wish.view()),
         Message::StatusMsg { view, .. } => format!("Status(v{view})"),
         Message::TCMsg(tc) => format!("TC(v{})", tc.view()),
+        Message::QCMsg(qc) => format!("QC(v{})", qc.view()),
     }
 }

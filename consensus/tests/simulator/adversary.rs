@@ -1,8 +1,8 @@
-use crate::simulator::byzantine::{ByzantineContext, ByzantineProxy, Input};
-use crate::simulator::dsl::VirtualClock;
-use crate::simulator::rng::SharedRng;
-use crate::simulator::simulator::{Duration, GlobalState, NodeEffects};
-use anyhow::Result;
+use crate::simulator::byzantine::ByzantineProxy;
+use crate::simulator::dsl::{NodeSelector, VirtualClock};
+use crate::simulator::rng::Randomness;
+use crate::simulator::simulator::{Duration, GlobalState};
+use anyhow::{Result, ensure};
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestDigest, TestScheme};
 use hotstuff_consensus::network::message::Message;
 use hotstuff_consensus::types::View;
@@ -12,14 +12,32 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Adversary<CS: ClockSource, D: DeliveryPolicy<CS>> {
     pub delivery: D,
-    pub byzantine: BTreeMap<NodeID, ByzantineProxy<CS>>,
+    pub byzantine_nodes: BTreeSet<NodeID>,
+    pub byzantine: BTreeMap<NodeID, Vec<ByzantineProxy<'static, CS>>>,
+    pub mutations: BTreeMap<NodeID, Vec<ByzantineProxy<'static, CS>>>,
+    factories: Vec<BehaviorFactory<CS>>,
+}
+
+enum BehaviorKind {
+    Byzantine,
+    Mutated,
+}
+
+struct BehaviorFactory<CS: ClockSource> {
+    kind: BehaviorKind,
+    selector: NodeSelector,
+    constructor: Box<dyn FnMut() -> ByzantineProxy<'static, CS>>,
 }
 
 impl<CS: ClockSource> Adversary<CS, StableDelay> {
-    pub fn new() -> Self {
+    /// Declares faulty nodes even when they have no active Byzantine behavior.
+    pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
         Self {
             delivery: StableDelay,
+            byzantine_nodes: ids.into_iter().map(NodeID::from).collect(),
             byzantine: BTreeMap::new(),
+            mutations: BTreeMap::new(),
+            factories: Vec::new(),
         }
     }
 }
@@ -28,22 +46,79 @@ impl<CS: ClockSource, D: DeliveryPolicy<CS>> Adversary<CS, D> {
     pub fn delivery<P: DeliveryPolicy<CS>>(self, delivery: P) -> Adversary<CS, P> {
         Adversary {
             delivery,
+            byzantine_nodes: self.byzantine_nodes,
             byzantine: self.byzantine,
+            mutations: self.mutations,
+            factories: self.factories,
         }
     }
 
-    pub fn byzantine(
+    /// Creates a separate proxy for each selected Byzantine node before the run starts.
+    pub fn byzantine_node(
         mut self,
-        id: u32,
-        activate_when: impl FnMut(&GlobalState<CS>) -> bool + 'static,
-        behavior: impl FnMut(&mut ByzantineContext<'_, CS>, Input) -> Result<NodeEffects<CS>> + 'static,
+        selector: NodeSelector,
+        constructor: impl FnMut() -> ByzantineProxy<'static, CS> + 'static,
     ) -> Self {
-        let proxy = ByzantineProxy {
-            activate_when: Box::new(activate_when),
-            behavior: Box::new(behavior),
-        };
-        self.byzantine.insert(NodeID::from(id), proxy);
+        self.factories.push(BehaviorFactory {
+            kind: BehaviorKind::Byzantine,
+            selector,
+            constructor: Box::new(constructor),
+        });
         self
+    }
+
+    /// Overrides selected non-Byzantine nodes without excluding them from honest-node checks.
+    /// All and Range select from the committee, including nodes that have not started yet.
+    pub fn mutate_node(
+        mut self,
+        selector: NodeSelector,
+        constructor: impl FnMut() -> ByzantineProxy<'static, CS> + 'static,
+    ) -> Self {
+        self.factories.push(BehaviorFactory {
+            kind: BehaviorKind::Mutated,
+            selector,
+            constructor: Box::new(constructor),
+        });
+        self
+    }
+
+    pub fn prepare_behaviors(&mut self, committee_size: u32, rng: &Randomness) -> Result<()> {
+        if self.factories.is_empty() {
+            return Ok(());
+        }
+        let byzantines: Vec<_> = self.byzantine_nodes.iter().copied().collect();
+        let honest: Vec<_> = (0..committee_size)
+            .map(NodeID::from)
+            .filter(|id| !self.byzantine_nodes.contains(id))
+            .collect();
+        for mut factory in self.factories.drain(..) {
+            let (candidates, handlers, method) = match factory.kind {
+                BehaviorKind::Byzantine => (&byzantines, &mut self.byzantine, "byzantine_node"),
+                BehaviorKind::Mutated => (&honest, &mut self.mutations, "mutate_node"),
+            };
+            let selected = match factory.selector {
+                NodeSelector::Id(id) => {
+                    ensure!(
+                        candidates.contains(&id),
+                        "{id:?} is not eligible for {method}"
+                    );
+                    vec![id]
+                }
+                NodeSelector::All => candidates.clone(),
+                NodeSelector::Range(f) => rng
+                    .sample_range(candidates.len() as u32, f)
+                    .into_iter()
+                    .map(|index| candidates[index as usize])
+                    .collect(),
+            };
+            for id in selected {
+                handlers
+                    .entry(id)
+                    .or_default()
+                    .push((factory.constructor)());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -113,6 +188,7 @@ pub enum Kind {
     Wish,
     Status,
     Tc,
+    Qc,
     Sync,
 }
 
@@ -132,6 +208,7 @@ impl Packet<'_> {
                 Message::WishMsg(_) => Kind::Wish,
                 Message::StatusMsg { .. } => Kind::Status,
                 Message::TCMsg(_) => Kind::Tc,
+                Message::QCMsg(_) => Kind::Qc,
             },
             Payload::Sync { .. } => Kind::Sync,
         }
@@ -145,6 +222,7 @@ impl Packet<'_> {
                 Message::WishMsg(wish) => wish.view(),
                 Message::StatusMsg { view, .. } => *view,
                 Message::TCMsg(tc) => tc.view(),
+                Message::QCMsg(qc) => qc.view(),
             }),
             Payload::Sync { .. } => None,
         }
@@ -158,10 +236,10 @@ pub fn fixed(delay: u64) -> FixedDelay<u64> {
 pub struct Uniform {
     lo: u64,
     hi: u64,
-    rng: SharedRng,
+    rng: Randomness,
 }
 
-pub fn uniform(lo: u64, hi: u64, rng: SharedRng) -> Uniform {
+pub fn uniform(lo: u64, hi: u64, rng: Randomness) -> Uniform {
     Uniform { lo, hi, rng }
 }
 
@@ -268,11 +346,11 @@ where
 
 pub struct Lossy<P> {
     percent: u64,
-    rng: SharedRng,
+    rng: Randomness,
     inner: P,
 }
 
-pub fn lossy<P>(percent: u64, rng: SharedRng, inner: P) -> Lossy<P> {
+pub fn lossy<P>(percent: u64, rng: Randomness, inner: P) -> Lossy<P> {
     Lossy {
         percent,
         rng,

@@ -14,6 +14,7 @@ pub enum Message<S: Scheme, C: Command> {
     WishMsg(SignedWish<S>),
     StatusMsg { qc: BlockQC<S>, view: View },
     TCMsg(TimeoutQC<S>),
+    QCMsg(BlockQC<S>),
 }
 
 impl<S: Scheme, C: Command> Message<S, C> {
@@ -24,6 +25,7 @@ impl<S: Scheme, C: Command> Message<S, C> {
             Message::WishMsg(signed_wish) => DriverInput::NewWish(signed_wish),
             Message::StatusMsg { qc, view } => DriverInput::NewStatus(Status { sender, qc, view }),
             Message::TCMsg(tc) => DriverInput::NewTC(tc),
+            Message::QCMsg(qc) => DriverInput::NewQC(qc),
         }
     }
 }

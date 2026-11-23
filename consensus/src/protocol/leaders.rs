@@ -46,22 +46,24 @@ impl LeaderPolicy for RoundRobin {
     }
 
     fn epoch_length(&self) -> View {
-        View::from(self.committee_size.saturating_sub(1) / 3 + 1)
+        View::from(self.committee_size)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hotstuff_types::threshold::{OneHonest, Threshold};
 
     #[test]
-    fn every_epoch_has_one_honest_leader() {
+    fn every_epoch_contains_the_whole_committee() {
         for n in [1, 4, 5, 7, 10] {
             let policy = RoundRobin::new(n);
+            let committee = (0..n).map(NodeID::from).collect::<BTreeSet<_>>();
+            assert_eq!(policy.epoch_length(), View::from(n));
             for view in 0..View::from(3 * n) {
-                assert!(
-                    policy.epoch_leaders(view).len() as u32 >= OneHonest::required(n),
+                assert_eq!(
+                    policy.epoch_leaders(view),
+                    committee,
                     "n = {n}, view = {view}"
                 );
             }

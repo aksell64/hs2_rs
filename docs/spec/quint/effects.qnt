@@ -7,6 +7,7 @@ module effects {
   | WishMsg(View)
   | StatusMsg({ qc: CertifiedBlock, view: View })
   | TCMsg(CertifiedView)
+  | QCMsg(CertifiedBlock)
 
   type Recipient =
   | All

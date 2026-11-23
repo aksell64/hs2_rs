@@ -18,6 +18,17 @@ module invariants {
   pure def monotony_of_executed_blocks(cur_state: NodeState, prev_state: NodeState): bool =
     cur_state.driver.consensus.exec_height >= prev_state.driver.consensus.exec_height
 
+  pure def block_dependencies_ready(state: NodeState): bool =
+    val blocks = state.kv.block_by_hash
+    blocks.keys().contains(state.driver.pacemaker.get_high_qc().block) and
+      blocks.keys().forall(hash =>
+        val block = blocks.get(hash)
+        if (block.height == 0) true
+        else match get_block_by_hash(state.kv, block.parent) {
+          | None => false
+          | Some(parent) => block.parent == block.justify.block and block.height == parent.height + 1
+        })
+
 
   type QCViewCollector = View -> Set[Hash]
 
