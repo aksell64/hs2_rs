@@ -36,6 +36,26 @@ pub enum DriverInput<S: Scheme, C: Command> {
     BlockSynced(Block<S, C>),
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl<S: Scheme, C: Command> Clone for DriverInput<S, C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::NewProposal { sender, proposal } => Self::NewProposal {
+                sender: *sender,
+                proposal: proposal.clone(),
+            },
+            Self::NewVote(vote) => Self::NewVote(vote.clone()),
+            Self::NewWish(wish) => Self::NewWish(wish.clone()),
+            Self::NewStatus(status) => Self::NewStatus(status.clone()),
+            Self::NewTC(tc) => Self::NewTC(tc.clone()),
+            Self::NewQC(qc) => Self::NewQC(qc.clone()),
+            Self::ViewTimerFired(view) => Self::ViewTimerFired(*view),
+            Self::LockTimerFired(view) => Self::LockTimerFired(*view),
+            Self::BlockSynced(block) => Self::BlockSynced(block.clone()),
+        }
+    }
+}
+
 pub struct DriverResult<S: Scheme, C: Command, CL: Clock> {
     pub net: Vec<Envelope<S, C>>,
     pub timers: Vec<TimerCommand<CL>>,

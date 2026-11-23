@@ -62,6 +62,12 @@ Renders the trace as markdown:
 
 ### Visualize trace
 
+    python3 tools/viz.py trace.itf.json --serve --step 200
+
+`--serve` opens the interactive viewer with the trace loaded over local HTTP. It binds to `127.0.0.1`
+on a free port; use `--port 8000` to select one. The server serves only this trace snapshot and runs
+until `Ctrl+C`. This also accepts JSON traces from the Rust simulator.
+
     python3 tools/viz.py trace.itf.json --html trace.html --shiviz trace.shiviz.log --dot blocks.dot --step 200
 
 - `--html` — a self-contained page (`tools/viewer.html` with the trace inlined); open it in a browser.

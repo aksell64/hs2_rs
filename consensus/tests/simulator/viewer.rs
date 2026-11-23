@@ -32,6 +32,8 @@ pub struct ViewerTrace {
     setup: String,
     n: u32,
     byzantine: BTreeSet<u32>,
+    byzantine_behaviors: BTreeMap<u32, Vec<&'static str>>,
+    mutated_behaviors: BTreeMap<u32, Vec<&'static str>>,
     crashed: BTreeSet<u32>,
     block_ids: BTreeMap<[u8; 4], u64>,
     digests: Vec<TestDigest>,
@@ -130,6 +132,9 @@ struct Step {
     time: String,
     tags: BTreeSet<&'static str>,
     nodes: BTreeMap<u32, NodeRecord>,
+    byzantine_behaviors: BTreeMap<u32, Vec<&'static str>>,
+    mutated_behaviors: BTreeMap<u32, Vec<&'static str>>,
+    executed_behaviors: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -149,18 +154,14 @@ struct NodeRecord {
 }
 
 impl ViewerTrace {
-    pub fn new(
-        title: &str,
-        setup: &str,
-        n: u32,
-        byzantine: &BTreeSet<NodeID>,
-        crashed: &BTreeSet<NodeID>,
-    ) -> Self {
+    pub fn new(title: &str, setup: &str, n: u32, crashed: &BTreeSet<NodeID>) -> Self {
         Self {
             title: title.to_owned(),
             setup: setup.to_owned(),
             n,
-            byzantine: byzantine.iter().copied().map(u32::from).collect(),
+            byzantine: BTreeSet::new(),
+            byzantine_behaviors: BTreeMap::new(),
+            mutated_behaviors: BTreeMap::new(),
             crashed: crashed.iter().copied().map(u32::from).collect(),
             block_ids: BTreeMap::new(),
             digests: Vec::new(),
@@ -171,6 +172,22 @@ impl ViewerTrace {
             steps: Vec::new(),
             marks: Vec::new(),
             sync: SyncCost::default(),
+        }
+    }
+
+    pub fn set_behaviors(
+        &mut self,
+        byzantine: &BTreeSet<NodeID>,
+        behaviors: BTreeMap<u32, Vec<&'static str>>,
+        mutations: BTreeMap<u32, Vec<&'static str>>,
+    ) {
+        self.byzantine = byzantine.iter().copied().map(u32::from).collect();
+        self.byzantine_behaviors = behaviors;
+        self.mutated_behaviors = mutations;
+        // Registration happens after the simulator records its initial state.
+        if self.steps.len() == 1 {
+            self.steps[0].byzantine_behaviors = self.byzantine_behaviors.clone();
+            self.steps[0].mutated_behaviors = self.mutated_behaviors.clone();
         }
     }
 
@@ -192,6 +209,9 @@ impl ViewerTrace {
             time: format!("{now:?}"),
             tags: BTreeSet::new(),
             nodes: BTreeMap::new(),
+            byzantine_behaviors: self.byzantine_behaviors.clone(),
+            mutated_behaviors: self.mutated_behaviors.clone(),
+            executed_behaviors: Vec::new(),
         });
         match action {
             "view_timeout" | "lock_timeout" => self.tag("timer"),
@@ -203,6 +223,18 @@ impl ViewerTrace {
     pub fn tag(&mut self, tag: &'static str) {
         if let Some(step) = self.steps.last_mut() {
             step.tags.insert(tag);
+        }
+    }
+
+    pub fn record_behaviors(&mut self, names: Vec<&'static str>) {
+        if let Some(step) = self.steps.last_mut() {
+            if !names.is_empty() {
+                let mutated = step
+                    .actor
+                    .is_some_and(|id| step.mutated_behaviors.contains_key(&id));
+                step.tags.insert(if mutated { "mutated" } else { "faulty" });
+            }
+            step.executed_behaviors = names;
         }
     }
 

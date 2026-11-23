@@ -13,7 +13,7 @@ mbt = ["testing"]
 [dependencies]
 hotstuff-types.workspace = true
 hotstuff-crypto.workspace = true
-codec = { package = "parity-scale-codec", version = "3.0", default-features = false, features = ["derive"],  bytes = "1" }
+codec = { package = "parity-scale-codec", version = "3.0", default-features = false, features = ["derive"] }
 bytes = "1.12.1"
 tokio = { version = "1.53.2", features = ["macros", "time", "sync"] }
 

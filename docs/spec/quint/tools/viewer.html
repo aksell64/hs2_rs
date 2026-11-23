@@ -59,6 +59,8 @@ main { flex: 1; display: grid; grid-template-columns: minmax(280px, var(--diagra
 .action { font-size: 14px; }
 .action code { background: var(--row); padding: 0 3px; border-radius: 3px; }
 .tag { display: inline-block; padding: 0 6px; border-radius: 10px; background: var(--row); border: 1px solid var(--line); color: var(--muted); font-size: 11px; margin-left: 4px; }
+.tag.behavior { color: var(--bad); border-color: var(--bad); }
+.tag.behavior.mutated { color: var(--accent); border-color: var(--accent); }
 #tree { overflow: scroll; height: 40vh; min-height: 200px; resize: vertical; }
 table { border-collapse: collapse; width: 100%; }
 th, td { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
@@ -121,7 +123,7 @@ svg text { fill: var(--fg); }
   <input type="number" id="stepnum" min="0" value="0">
   <select id="tagsel" title="Jump target for shift+← / shift+→">
     <option value="qc">new QC</option><option value="commit">commit</option><option value="view">view change</option>
-    <option value="timer">timer</option><option value="faulty">faulty</option><option value="drop">dropped</option><option value="sync">blocksync</option><option value="mark">mark</option>
+    <option value="timer">timer</option><option value="faulty">faulty</option><option value="mutated">mutated</option><option value="drop">dropped</option><option value="sync">blocksync</option><option value="mark">mark</option>
   </select>
   <button id="tprev" title="Previous tagged step (shift+←)">⇤</button>
   <button id="tnext" title="Next tagged step (shift+→)">⇥</button>
@@ -253,6 +255,37 @@ function layoutRows() {
   D.rowTops[n] = y;
 }
 
+function laneHeaders() {
+  const lanes = $('lanes'), w = +lanes.getAttribute('width');
+  const step = D.steps[cur] || D.steps[0], mutations = step.mutated_behaviors || {};
+  const behaviors = { ...(step.byzantine_behaviors || {}), ...mutations };
+  const spacing = (w - LEFT - 16) / Math.max(1, D.meta.hosts.length - 1);
+  lanes.innerHTML = '';
+  lanes.style.height = Object.keys(behaviors).length ? '42px' : '24px';
+  for (const host of D.meta.hosts) {
+    const x = laneX(host, w), faulty = D.faulty.includes(host);
+    const mutated = Object.hasOwn(mutations, host);
+    const role = mutated ? 'mutated' : faulty ? D.meta.faulty_label || 'faulty' : '';
+    const group = el('g', { class: 'lane-name' }, lanes);
+    group.onclick = () => toggleNode(host);
+    el('text', { x, y: 16, 'text-anchor': 'middle', 'font-size': 12, 'font-weight': 600, style: `fill:${nodeColor(host)}` }, group, `n${host}${role ? ` (${role})` : ''}`);
+    if (Object.hasOwn(behaviors, host)) {
+      const names = behaviors[host], full = names.length ? names.join(', ') : 'no handler';
+      const anchor = host === D.meta.hosts[0] ? 'start' : host === D.meta.hosts[D.meta.hosts.length - 1] ? 'end' : 'middle';
+      const label = el('text', { x, y: 32, 'text-anchor': anchor, 'font-size': 11, style: 'fill:var(--muted)' }, group, full);
+      const available = anchor === 'start' ? w - x : anchor === 'end' ? x : 2 * Math.min(x, w - x);
+      const limit = Math.max(8, Math.min(spacing - 12, available - 8));
+      let clipped = full;
+      while (clipped.length && label.getComputedTextLength() > limit) {
+        clipped = clipped.slice(0, -1);
+        label.textContent = clipped + '…';
+      }
+      el('title', {}, group, mutated ? `Mutation handlers: ${full}. Node remains included in honest-node checks.` : names.length ? `Configured behaviors: ${full}` : 'No Byzantine handler configured; node follows the protocol.');
+    }
+    D.laneEls.set(host, [group, ...(D.laneEls.get(host) || []).slice(1)]);
+  }
+}
+
 function chart() {
   const box = $('diagram'), svg = $('chart'), lanes = $('lanes');
   const before = svg.getBoundingClientRect();
@@ -266,13 +299,7 @@ function chart() {
   lanes.setAttribute('width', w);
   D.laneEls = new Map();
   D.stepEls = [];
-  for (const host of D.meta.hosts) {
-    const x = laneX(host, w);
-    const faulty = D.faulty.includes(host);
-    const name = el('text', { x, y: 16, class: 'lane-name', 'text-anchor': 'middle', 'font-size': 12, 'font-weight': 600, style: `fill:${nodeColor(host)}` }, lanes, `n${host}${faulty ? ` (${D.meta.faulty_label || 'faulty'})` : ''}`);
-    name.onclick = () => toggleNode(host);
-    D.laneEls.set(host, [name]);
-  }
+  laneHeaders();
   const bg = el('g', {}, svg);
   D.curRow = el('rect', { x: 0, width: w, height: D.rowGap, style: `fill:var(--cur)` }, bg);
   for (const host of D.meta.hosts) {
@@ -304,7 +331,7 @@ function chart() {
     const line = el('line', attrs, arrows);
     const dot = m.recv !== null ? el('circle', { cx: x2, cy: y2, r: 2, style: `fill:${kindColor(m.kind)}`, opacity: .8 }, arrows) : null;
     const hit = el('line', { x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': 7 }, arrows);
-    hit.onmousemove = e => tip(e, `<b>${esc(m.kind)}</b> n${m.from} → n${m.to} · sent ${m.send} · ${m.dropped ? 'dropped by the network' : m.recv === null ? 'in flight at end' : 'received ' + m.recv}<br><code>${esc(m.text)}</code>`);
+    hit.onmousemove = e => tip(e, `<b>${esc(m.kind)}</b> n${m.from} → n${m.to} · sent ${m.send}${m.dropped ? ' · dropped by the network' : m.recv === null ? '' : ' · received ' + m.recv}<br><code>${esc(m.text)}</code>`);
     hit.onmouseleave = untip;
     hit.onclick = () => pick(m.recv === null ? m.send : m.recv);
     D.arrowEls.push({ m, line, dot });
@@ -325,9 +352,13 @@ function chart() {
     if (t.includes('commit')) shape = el('rect', { x: x - half, y: y - half, width: 2 * half, height: 2 * half, transform: `rotate(45 ${x} ${y})`, style: `fill:${nodeColor(s.actor)}` }, marks);
     else if (t.includes('timer')) shape = el('rect', { x: x - half, y: y - half, width: 2 * half, height: 2 * half, style: `fill:var(--panel);stroke:${nodeColor(s.actor)}`, 'stroke-width': 2 }, marks);
     else shape = el('circle', { cx: x, cy: y, r: t.includes('drop') ? 3.5 * size : half, style: `fill:${t.includes('drop') ? 'var(--muted)' : nodeColor(s.actor)}` }, marks);
+    if (s.executed_behaviors?.length) {
+      shape.style.stroke = s.tags.includes('mutated') ? 'var(--accent)' : 'var(--bad)';
+      shape.setAttribute('stroke-width', 2);
+    }
     shape.style.cursor = 'pointer';
     shape.onclick = () => pick(i);
-    shape.onmousemove = e => tip(e, `<b>${i}</b>${s.time !== undefined ? ' t=' + esc(s.time) : ''} ${esc(s.action)} ${s.tags.map(x => `<span class="tag">${x}</span>`).join('')}<br>${md(s.label)}`);
+    shape.onmousemove = e => tip(e, `<b>${i}</b>${s.time !== undefined ? ' t=' + esc(s.time) : ''} ${esc(s.action)} ${s.tags.map(x => `<span class="tag">${x}</span>`).join('')}<br>${md(s.label)}${s.executed_behaviors?.length ? '<br>Handlers:' + behaviorTags(s) : ''}`);
     shape.onmouseleave = untip;
     const prev = D.steps[i - 1].nodes[s.actor], now = s.nodes[s.actor], els = [shape];
     const entered = prev && now && prev.view !== now.view;
@@ -372,8 +403,11 @@ function fullCaption(i) {
   const s = D.steps[i], prev = i > 0 ? D.steps[i - 1].nodes[s.actor] : null, now = s.nodes[s.actor];
   const entered = prev && now && prev.view !== now.view;
   const qc = i > 0 && D.qcAt[i] ? ' · ' + qcCaption(i) : '';
-  return stepCaption(i) + qc + (entered ? ` → v${now.view}` : '') + (s.tags.includes('commit') ? ' · commit' : '');
+  const behaviors = s.executed_behaviors?.length ? ` · [${s.executed_behaviors.join(', ')}]` : '';
+  return stepCaption(i) + qc + (entered ? ` → v${now.view}` : '') + (s.tags.includes('commit') ? ' · commit' : '') + behaviors;
 }
+
+const behaviorTags = s => (s.executed_behaviors || []).map(name => `<span class="tag behavior${s.tags.includes('mutated') ? ' mutated' : ''}">${esc(name)}</span>`).join('');
 
 const qcCaption = i => D.qcAt[i].map(q => `QC b${q.block}@v${q.view}`).join(' ');
 
@@ -532,12 +566,14 @@ function go(i, scroll) {
   cur = next;
   $('slider').value = $('stepnum').value = cur;
   try { history.replaceState(null, '', `#step=${cur}`); } catch (e) {}
+  laneHeaders();
   highlight();
   detail();
   const box = $('diagram'), plot = $('chart').getBoundingClientRect();
   const top = plot.top - box.getBoundingClientRect().top, y = top + rowY(cur);
-  if (scroll || y < 30 || y > box.clientHeight - 40) {
-    box.scrollTop += Math.max(top - 24, Math.min(top + plot.height - box.clientHeight, y - box.clientHeight / 2));
+  const laneHeight = $('lanes').getBoundingClientRect().height;
+  if (scroll || y < laneHeight + 6 || y > box.clientHeight - 40) {
+    box.scrollTop += Math.max(top - laneHeight, Math.min(top + plot.height - box.clientHeight, y - box.clientHeight / 2));
   }
 }
 
@@ -617,11 +653,11 @@ function stateChanges(s, prev) {
 function stepEffects(i) {
   const s = D.steps[i], groups = new Map();
   for (const m of D.byStep[i].sent) groups.set(m.text, [...(groups.get(m.text) || []), m]);
-  const arrival = m => `n${m.to} ${m.dropped ? 'dropped' : m.recv === null ? 'in flight' : stepLink(m.recv)}`;
+  const arrival = m => `n${m.to}${m.dropped ? ' dropped' : m.recv === null ? '' : ' ' + stepLink(m.recv)}`;
   const effects = [...groups].map(([text, group]) => `sent <code>${esc(text)}</code> → ${group.map(arrival).join(', ')}`);
   if (i > 0) for (const q of D.qcAt[i] || []) effects.push(`new QC <code>b${q.block}@v${q.view}</code>`);
   if (s.tags.includes('sync') && s.action !== 'synced') effects.push('requested blocksync');
-  if (s.tags.includes('faulty')) effects.push('byzantine behaviour is active on this node');
+  if (s.tags.includes('faulty') && !s.executed_behaviors?.length) effects.push('byzantine behaviour is active on this node');
   return effects;
 }
 
@@ -631,6 +667,7 @@ function pointHtml(i, openLink) {
   rows.push(['event', m
     ? `received <code>${esc(m.text)}</code> from n${m.from}, sent ${stepLink(m.send)}, took ${delayOf(m)}`
     : `${md(s.label)}${note ? ` <span class="empty">· ${note}</span>` : ''}`]);
+  if (s.executed_behaviors?.length) rows.push(['handlers', behaviorTags(s)]);
   const effects = stepEffects(i), changes = stateChanges(s, prev);
   if (effects.length) rows.push(['effects', effects.join('<br>')]);
   if (changes.length) rows.push(['state', changes.join('<br>')]);
@@ -682,7 +719,7 @@ function blockCard() {
 
 function msgs() {
   const { sent, recv } = D.byStep[cur];
-  const line = (m, dir) => `<div><span class="sw" style="background:${kindColor(m.kind)}"></span> ${dir} n${m.from} → n${m.to} <code>${esc(m.text)}</code> <span class="empty">${dir === 'sent' ? (m.recv === null ? 'in flight' : 'recv @' + m.recv) : 'sent @' + m.send}</span></div>`;
+  const line = (m, dir) => `<div><span class="sw" style="background:${kindColor(m.kind)}"></span> ${dir} n${m.from} → n${m.to} <code>${esc(m.text)}</code> <span class="empty">${dir === 'sent' ? (m.recv === null ? '' : 'recv @' + m.recv) : 'sent @' + m.send}</span></div>`;
   const html = recv.map(m => line(m, 'recv')).join('') + sent.map(m => line(m, 'sent')).join('');
   $('msgs').innerHTML = html || '<span class="empty">none</span>';
 }

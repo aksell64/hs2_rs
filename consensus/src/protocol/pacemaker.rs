@@ -28,6 +28,17 @@ pub struct Status<S: Scheme> {
     pub view: View,
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl<S: Scheme> Clone for Status<S> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender,
+            qc: self.qc.clone(),
+            view: self.view,
+        }
+    }
+}
+
 pub enum PacemakerOutput {
     NoPacemakerOutput,
     ProposeNow(View),

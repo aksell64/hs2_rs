@@ -4,6 +4,8 @@ import json
 import os
 import re
 import sys
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from analyze import describe, entries, fmt, nodes_of, num, signers, var  # noqa: E402
@@ -301,35 +303,83 @@ def dot(data, step):
     return '\n'.join(lines) + '\n'
 
 
+def viewer_page(data):
+    payload = json.dumps(data, separators=(',', ':')).replace('</', '<\\/')
+    with open(VIEWER, encoding='utf-8') as f:
+        return f.read().replace('const EMBEDDED = null;', f'const EMBEDDED = {payload};', 1)
+
+
+def serve(page, port, step):
+    content = page.encode('utf-8')
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.split('?', 1)[0] != '/':
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, format, *args):
+            pass
+
+    # Serve only the selected trace, without exposing the surrounding directory.
+    with ThreadingHTTPServer(('127.0.0.1', port), Handler) as server:
+        url = f'http://127.0.0.1:{server.server_port}/'
+        if step is not None:
+            url += f'#step={step}'
+        print(f'Open trace: {url}\nPress Ctrl+C to stop the server.', flush=True)
+        if not webbrowser.open(url):
+            print('Could not open a browser automatically; open the URL above.', file=sys.stderr)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Export a Quint ITF trace for visualization.')
+    parser = argparse.ArgumentParser(description='Visualize a Quint ITF or simulator trace.')
     parser.add_argument('trace')
     parser.add_argument('--html', help='self-contained viewer with the trace inlined')
+    parser.add_argument('--serve', action='store_true', help='serve the viewer on localhost and open it in a browser')
+    parser.add_argument('--port', type=int, default=0, help='HTTP port for --serve (default: choose a free port)')
     parser.add_argument('--json', help='trace in the viewer format')
     parser.add_argument('--shiviz', help='log for https://bestchai.bitbucket.io/shiviz/')
     parser.add_argument('--dot', help='block tree in Graphviz format')
-    parser.add_argument('--step', type=int, help='step for --dot (default: last)')
+    parser.add_argument('--step', type=int, help='initial step for --serve, or step for --dot (default: last)')
     args = parser.parse_args()
+    if not 0 <= args.port <= 65535:
+        parser.error('--port must be between 0 and 65535')
     trace = json.load(open(args.trace))
     # A viewer JSON (e.g. from the Rust simulator) is taken as is.
     data = trace if 'steps' in trace and 'meta' in trace else export(trace, os.path.basename(args.trace))
+    if args.step is not None and not 0 <= args.step < len(data['steps']):
+        parser.error(f'--step must be between 0 and {len(data["steps"]) - 1}')
     for w in data['meta']['warnings']:
         print('warning:', w, file=sys.stderr)
     if args.json:
         with open(args.json, 'w') as f:
             json.dump(data, f, separators=(',', ':'))
-    if args.html:
-        payload = json.dumps(data, separators=(',', ':')).replace('</', '<\\/')
-        with open(VIEWER) as f:
-            page = f.read()
-        with open(args.html, 'w') as f:
-            f.write(page.replace('const EMBEDDED = null;', f'const EMBEDDED = {payload};', 1))
+    if args.html or args.serve:
+        page = viewer_page(data)
+        if args.html:
+            with open(args.html, 'w', encoding='utf-8') as f:
+                f.write(page)
     if args.shiviz:
         with open(args.shiviz, 'w') as f:
             f.write(shiviz(data))
     if args.dot:
         with open(args.dot, 'w') as f:
             f.write(dot(data, data['meta']['steps'] if args.step is None else args.step))
+    if args.serve:
+        try:
+            serve(page, args.port, args.step)
+        except OSError as error:
+            parser.exit(1, f'Could not serve the trace: {error}\n')
 
 
 if __name__ == '__main__':

@@ -30,12 +30,12 @@ impl SplitMix64 {
 }
 
 #[derive(Clone)]
-pub struct SharedRng {
+pub struct Randomness {
     seed: u64,
     inner: Rc<RefCell<SplitMix64>>,
 }
 
-impl SharedRng {
+impl Randomness {
     pub fn new(seed: u64) -> Self {
         Self {
             seed,
@@ -53,5 +53,28 @@ impl SharedRng {
 
     pub fn chance(&self, percent: u64) -> bool {
         self.inner.borrow_mut().chance(percent)
+    }
+
+    pub fn rand(&self) -> u64 {
+        self.inner.borrow_mut().next_u64()
+    }
+
+    /// Selects a random number of distinct values from `0..n`, at most `f`.
+    pub fn sample_range(&self, n: u32, f: u32) -> Vec<u32> {
+        let count = self.range(0, u64::from(f.min(n))) as u32;
+        self.sample_exact(n, count)
+    }
+
+    /// Selects exactly `f` distinct values from `0..n`. Panics if `f > n`.
+    pub fn sample_exact(&self, n: u32, f: u32) -> Vec<u32> {
+        assert!(f <= n, "cannot sample {f} distinct values from 0..{n}");
+        let count = f as usize;
+        let mut nodes: Vec<_> = (0..n).collect();
+        for i in 0..count {
+            let j = self.range(i as u64, u64::from(n) - 1) as usize;
+            nodes.swap(i, j);
+        }
+        nodes.truncate(count);
+        nodes
     }
 }

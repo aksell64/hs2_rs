@@ -59,7 +59,7 @@ pub struct Effects<S: Scheme, C: Command, CL: Clock> {
 }
 
 impl<S: Scheme, C: Command, CL: Clock> Effects<S, C, CL> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             net: Vec::default(),
             timers: Vec::default(),
@@ -68,7 +68,7 @@ impl<S: Scheme, C: Command, CL: Clock> Effects<S, C, CL> {
         }
     }
 
-    fn merge(&mut self, other: Self) {
+    pub fn merge(&mut self, other: Self) {
         self.net.extend(other.net);
         self.timers.extend(other.timers);
         self.sync.extend(other.sync);
@@ -147,6 +147,11 @@ impl<
     #[cfg(any(test, feature = "testing"))]
     pub fn storage(&self) -> &DB {
         &self.db
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn storage_mut(&mut self) -> &mut DB {
+        &mut self.db
     }
 
     #[cfg(any(test, feature = "testing"))]

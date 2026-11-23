@@ -1,4 +1,5 @@
-use crate::simulator::dsl::State;
+use crate::simulator::dsl::VirtualClock;
+use crate::simulator::simulator::Context;
 use anyhow::{Context as _, Result, ensure};
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestDigest, TestScheme};
 use hotstuff_consensus::storage::ReadStorage;
@@ -6,11 +7,11 @@ use hotstuff_consensus::types::View;
 use hotstuff_types::node::NodeID;
 use std::collections::BTreeMap;
 
-pub fn safety() -> impl FnMut(&State) -> Result<()> {
+pub fn safety() -> impl FnMut(&Context<'_, VirtualClock>) -> Result<()> {
     let mut canonical: BTreeMap<u64, TestDigest> = BTreeMap::new();
     let mut checked: BTreeMap<NodeID, usize> = BTreeMap::new();
-    move |state| {
-        for (id, log) in state.honest_commit_logs() {
+    move |ctx| {
+        for (id, log) in ctx.honest_commit_logs() {
             let done = checked.entry(id).or_insert(0);
             for i in *done..log.len() {
                 let commit = &log[i];
@@ -43,9 +44,10 @@ pub fn proposal_rejected(
     proposal: TestDigest,
     voted_view: View,
     locked: (View, TestDigest),
-) -> impl FnMut(&State) -> Result<()> {
-    move |state| {
-        for id in state.honest_nodes() {
+) -> impl FnMut(&Context<'_, VirtualClock>) -> Result<()> {
+    move |ctx| {
+        let state = ctx.state;
+        for id in ctx.honest_nodes() {
             let replica = state.replica(id).context("honest node is not running")?;
             let storage: &dyn ReadStorage<TestScheme, TestCommand> = replica.storage();
             ensure!(
@@ -72,8 +74,9 @@ pub fn proposal_rejected(
     }
 }
 
-pub fn no_view_timeouts() -> impl FnMut(&State) -> Result<()> {
-    |state| {
+pub fn no_view_timeouts() -> impl FnMut(&Context<'_, VirtualClock>) -> Result<()> {
+    |ctx| {
+        let state = ctx.state;
         ensure!(
             state.view_timeouts() == 0,
             "{} view timers fired",
@@ -83,8 +86,9 @@ pub fn no_view_timeouts() -> impl FnMut(&State) -> Result<()> {
     }
 }
 
-pub fn no_k_view_timeouts(k: u64) -> impl FnMut(&State) -> Result<()> {
-    move |state| {
+pub fn no_k_view_timeouts(k: u64) -> impl FnMut(&Context<'_, VirtualClock>) -> Result<()> {
+    move |ctx| {
+        let state = ctx.state;
         ensure!(
             state.view_timeouts() <= k,
             "{} view timers fired",

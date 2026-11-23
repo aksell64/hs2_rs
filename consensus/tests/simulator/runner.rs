@@ -1,13 +1,13 @@
 use crate::simulator::adversary::{Adversary, DeliveryPolicy, StableDelay};
-use crate::simulator::simulator::{GlobalState, ManualClock, Simulator};
+use crate::simulator::simulator::{Context, GlobalState, ManualClock, Simulator};
 use anyhow::{Context as _, Result, bail, ensure};
 use hotstuff_types::node::NodeID;
 use std::fmt::Debug;
 
-type Invariant<CS> = Box<dyn FnMut(&GlobalState<CS>) -> Result<()>>;
-type Stop<CS> = Box<dyn FnMut(&GlobalState<CS>) -> bool>;
+type Invariant<CS> = Box<dyn FnMut(&Context<'_, CS>) -> Result<()>>;
+type Stop<CS> = Box<dyn FnMut(&Context<'_, CS>) -> bool>;
 
-type Hook<CS> = Box<dyn FnMut(&GlobalState<CS>)>;
+type Hook<CS> = Box<dyn FnMut(&Context<'_, CS>)>;
 
 pub struct Env<CS: ManualClock, DP: DeliveryPolicy<CS>> {
     adversary: Adversary<CS, DP>,
@@ -21,7 +21,7 @@ pub struct Env<CS: ManualClock, DP: DeliveryPolicy<CS>> {
 impl<CS: ManualClock> Env<CS, StableDelay> {
     pub fn new() -> Self {
         Self {
-            adversary: Adversary::new(),
+            adversary: Adversary::new([]),
             invariants: Vec::new(),
             stop: Box::new(|_| false),
             deadline: None,
@@ -45,14 +45,16 @@ impl<CS: ManualClock, DP: DeliveryPolicy<CS>> Env<CS, DP> {
 
     pub fn invariant(
         mut self,
-        invariant: impl FnMut(&GlobalState<CS>) -> Result<()> + 'static,
+        invariant: impl FnMut(&Context<'_, CS>) -> Result<()> + 'static,
     ) -> Self {
         self.invariants.push(Box::new(invariant));
         self
     }
 
-    pub fn stop_cond(mut self, stop: impl FnMut(&GlobalState<CS>) -> bool + 'static) -> Self {
+    /// Starts a new wait without a deadline. Call `deadline` afterwards to set one.
+    pub fn stop_cond(mut self, stop: impl FnMut(&Context<'_, CS>) -> bool + 'static) -> Self {
         self.stop = Box::new(stop);
+        self.deadline = None;
         self
     }
 
@@ -61,12 +63,12 @@ impl<CS: ManualClock, DP: DeliveryPolicy<CS>> Env<CS, DP> {
         self
     }
 
-    pub fn before_tick(mut self, hook: impl FnMut(&GlobalState<CS>) + 'static) -> Self {
+    pub fn before_tick(mut self, hook: impl FnMut(&Context<'_, CS>) + 'static) -> Self {
         self.before_tick_hook = Some(Box::new(hook));
         self
     }
 
-    pub fn after_tick(mut self, hook: impl FnMut(&GlobalState<CS>) + 'static) -> Self {
+    pub fn after_tick(mut self, hook: impl FnMut(&Context<'_, CS>) + 'static) -> Self {
         self.after_tick_hook = Some(Box::new(hook));
         self
     }
@@ -100,15 +102,29 @@ where
         self.sim.state()
     }
 
-    pub fn run<DP: DeliveryPolicy<CS>>(&mut self, mut env: Env<CS, DP>) -> Result<()> {
+    pub fn context<'a, DP: DeliveryPolicy<CS>>(&'a self, env: &'a Env<CS, DP>) -> Context<'a, CS> {
+        self.sim.context(&env.adversary.byzantine_nodes)
+    }
+
+    /// Repeated runs of a scenario must declare the same Byzantine nodes.
+    pub fn run<DP: DeliveryPolicy<CS>>(&mut self, env: &mut Env<CS, DP>) -> Result<()> {
+        let committee_size = self.sim.state().committee_size();
+        env.adversary.prepare_behaviors(committee_size, &self.sim.rng)?;
         for id in env.adversary.byzantine.keys() {
             ensure!(
-                self.sim.state().is_byzantine(*id),
-                "{id:?} has a byzantine behavior but is not declared in Setup::byzantine"
+                env.adversary.byzantine_nodes.contains(id),
+                "{id:?} has a byzantine behavior but is not declared in Adversary::new"
             );
         }
-        self.check(&mut env.invariants)?;
-        while !(env.stop)(self.sim.state()) {
+        for id in env.adversary.mutations.keys() {
+            ensure!(
+                u32::from(*id) < committee_size && !env.adversary.byzantine_nodes.contains(id),
+                "{id:?} has a mutation but is not a non-Byzantine committee member"
+            );
+        }
+        self.sim.trace_behaviors(&env.adversary);
+        self.check(env)?;
+        while !(env.stop)(&self.sim.context(&env.adversary.byzantine_nodes)) {
             let now = self.sim.state().now();
             match (self.sim.state().next_time(), env.deadline) {
                 (None, _) => bail!("stalled at {now:?}: no events, no timers"),
@@ -119,24 +135,25 @@ where
             }
 
             if let Some(hook) = &mut env.before_tick_hook {
-                hook(self.sim.state());
+                hook(&self.sim.context(&env.adversary.byzantine_nodes));
             }
 
             self.sim.tick(&mut env.adversary)?;
 
             if let Some(hook) = &mut env.after_tick_hook {
-                hook(self.sim.state());
+                hook(&self.sim.context(&env.adversary.byzantine_nodes));
             }
 
-            self.check(&mut env.invariants)?;
+            self.check(env)?;
         }
         Ok(())
     }
 
-    fn check(&self, invariants: &mut [Invariant<CS>]) -> Result<()> {
-        let state = self.sim.state();
-        for invariant in invariants {
-            invariant(state).with_context(|| format!("invariant violated at {:?}", state.now()))?;
+    fn check<DP: DeliveryPolicy<CS>>(&self, env: &mut Env<CS, DP>) -> Result<()> {
+        let context = self.sim.context(&env.adversary.byzantine_nodes);
+        for invariant in &mut env.invariants {
+            invariant(&context)
+                .with_context(|| format!("invariant violated at {:?}", context.state.now()))?;
         }
         Ok(())
     }
