@@ -12,6 +12,7 @@ use hotstuff_consensus::protocol::leaders::{LeaderPolicy, RoundRobin};
 use hotstuff_consensus::sm::Effects;
 use hotstuff_consensus::storage::{ReadStorage, Storage, WriteStorage};
 use hotstuff_consensus::storage::kv_storage::KVStorage;
+use hotstuff_consensus::storage::staged::StagedStorage;
 use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::block::{Block, Proposal};
 use hotstuff_consensus::types::clock::ClockSource;
@@ -224,7 +225,8 @@ pub fn unlimited_votes<CS: ClockSource>()
 pub fn unlimited_votes_and_qcs<CS: ClockSource>()
 -> impl FnMut(&mut ByzantineContext<'_, CS>, Input) -> Result<NodeEffects<CS>> {
     let mut vote_as_mutant = unlimited_votes();
-    let mut collectors: HashMap<(View, TestDigest), Collector<TestScheme>> = HashMap::new();
+    let mut collector_stores: HashMap<(View, TestDigest), KVStorage<MemoryKV<Vec<u8>, Vec<u8>>>> =
+        HashMap::new();
     move |ctx, input| {
         let DriverInput::NewVote(vote) = input else {
             return vote_as_mutant(ctx, input);
@@ -242,13 +244,15 @@ pub fn unlimited_votes_and_qcs<CS: ClockSource>()
             return ctx.apply_as_honest(DriverInput::NewVote(vote));
         }
 
-        // Each block gets its own quorum, signer deduplication, and ready flag.
-        let collector = collectors
+        let storage = collector_stores
             .entry((vote.view(), vote.block_hash()))
-            .or_insert_with(|| Collector::new(notary));
-        if let CollectorOutput::GenericOutput(CertificateOutput::Ready(qc)) =
-            collector.apply(CollectorInput::GenericVoteInput(vote))
-        {
+            .or_insert_with(|| KVStorage::new(MemoryKV::new()));
+        let mut staged = StagedStorage::<TestScheme, TestCommand, _>::new(storage);
+        let output =
+            Collector::new(notary).apply(&mut staged, CollectorInput::GenericVoteInput(vote))?;
+        let batch = staged.into_batch();
+        Storage::<TestScheme, TestCommand>::commit_write_batch(storage, batch)?;
+        if let CollectorOutput::GenericOutput(CertificateOutput::Ready(qc)) = output {
             // Match the state machine's Replay(NewQC) ordering.
             ctx.replica.push_front_input(DriverInput::NewQC(qc));
         }

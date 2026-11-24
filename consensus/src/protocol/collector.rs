@@ -1,13 +1,13 @@
 use crate::protocol::collector::CertificateOutput::{AlreadyReady, NotReady, Ready};
+use crate::storage::{KVError, ReadWriteStorage};
 use crate::types::View;
+use crate::types::block::Command;
 use crate::types::certificate::{QuorumCertificate, Signature, SignedVote, SignedWish};
 use crate::types::crypto::{Notary, Signable};
 use crate::types::vote::Vote;
 use crate::types::wish::Wish;
 use hotstuff_crypto::sign::Scheme;
-use hotstuff_types::node::NodeID;
 use hotstuff_types::threshold::{Quorum, Threshold};
-use std::collections::BTreeMap;
 
 pub enum CollectorInput<S: Scheme> {
     GenericVoteInput(SignedVote<S>),
@@ -31,8 +31,6 @@ pub type TimeoutCollectorOutput<S> = CertificateOutput<S, Wish>;
 
 pub struct Collector<S: Scheme> {
     notary: Notary<S>,
-    generic_collectors: BTreeMap<View, CertificateCollector<S, Vote<S>>>,
-    timeout_collectors: BTreeMap<View, CertificateCollector<S, Wish>>,
     threshold: u32,
 }
 
@@ -41,95 +39,84 @@ impl<S: Scheme> Collector<S> {
         Self {
             threshold: Quorum::required(notary.committee_size()),
             notary,
-            generic_collectors: BTreeMap::new(),
-            timeout_collectors: BTreeMap::new(),
         }
     }
 
-    pub fn apply(&mut self, event: CollectorInput<S>) -> CollectorOutput<S> {
-        match event {
-            CollectorInput::GenericVoteInput(vote) => CollectorOutput::GenericOutput(Self::add_signature(
-                &mut self.generic_collectors,
-                &self.notary,
-                self.threshold,
-                vote.view(),
-                vote,
-            )),
-            CollectorInput::WishInput(wish) => CollectorOutput::TimeoutOutput(Self::add_signature(
-                &mut self.timeout_collectors,
-                &self.notary,
-                self.threshold,
-                wish.view(),
-                wish,
-            )),
-        }
+    pub fn apply<C: Command, DB: ReadWriteStorage<S, C>>(
+        &self,
+        storage: &mut DB,
+        event: CollectorInput<S>,
+    ) -> Result<CollectorOutput<S>, KVError> {
+        let output = match event {
+            CollectorInput::GenericVoteInput(vote) => {
+                CollectorOutput::GenericOutput(self.on_vote(storage, vote)?)
+            }
+            CollectorInput::WishInput(wish) => {
+                CollectorOutput::TimeoutOutput(self.on_wish(storage, wish)?)
+            }
+        };
+        Ok(output)
     }
 
-    fn add_signature<T: Signable + Clone + PartialEq>(
-        collectors: &mut BTreeMap<View, CertificateCollector<S, T>>,
-        notary: &Notary<S>,
-        threshold: u32,
-        view: View,
-        signature: Signature<S, T>,
-    ) -> CertificateOutput<S, T> {
-        let collector = collectors
-            .entry(view)
-            .or_insert_with(|| CertificateCollector::new(threshold));
-
-        if collector.is_ready() {
-            return AlreadyReady(view);
+    fn on_vote<C: Command, DB: ReadWriteStorage<S, C>>(
+        &self,
+        storage: &mut DB,
+        vote: SignedVote<S>,
+    ) -> Result<GenericCollectorOutput<S>, KVError> {
+        let view = vote.view();
+        if storage.get_block_qc(view)?.is_some() {
+            return Ok(AlreadyReady(view));
         }
-
-        match collector.add_signature(notary, signature) {
-            Some(qc) => Ready(qc),
-            None => NotReady,
+        if storage.exists_vote(view, vote.creator())? {
+            return Ok(NotReady);
         }
-    }
-}
-
-struct CertificateCollector<S: Scheme, T: Signable> {
-    collected: BTreeMap<NodeID, Signature<S, T>>,
-    threshold: u32,
-    ready: bool,
-}
-
-impl<S: Scheme, T: Signable> CertificateCollector<S, T> {
-    fn new(threshold: u32) -> Self {
-        Self {
-            collected: BTreeMap::new(),
-            threshold,
-            ready: false,
+        storage.insert_vote(&vote)?;
+        if storage.get_votes_count(view, &vote.block_hash())? < self.threshold as usize {
+            return Ok(NotReady);
         }
+        let Some(qc) = self.aggregate(vote.subject, storage.get_votes(view)?) else {
+            return Ok(NotReady);
+        };
+        storage.insert_block_qc(&qc)?;
+        Ok(Ready(qc))
     }
 
-    fn is_ready(&self) -> bool {
-        self.ready
+    fn on_wish<C: Command, DB: ReadWriteStorage<S, C>>(
+        &self,
+        storage: &mut DB,
+        wish: SignedWish<S>,
+    ) -> Result<TimeoutCollectorOutput<S>, KVError> {
+        let view = wish.view();
+        if storage.get_timeout_qc(view)?.is_some() {
+            return Ok(AlreadyReady(view));
+        }
+        if storage.exists_wish_vote(view, wish.creator())? {
+            return Ok(NotReady);
+        }
+        storage.insert_wish_vote(&wish)?;
+        if storage.get_wish_votes_count(view)? < self.threshold as usize {
+            return Ok(NotReady);
+        }
+        let Some(qc) = self.aggregate(wish.subject, storage.get_wish_votes(view)?) else {
+            return Ok(NotReady);
+        };
+        storage.insert_timeout_qc(&qc)?;
+        Ok(Ready(qc))
     }
 
-    fn add_signature(
-        &mut self,
-        notary: &Notary<S>,
-        signature: Signature<S, T>,
-    ) -> Option<QuorumCertificate<S, T>>
-    where
-        T: Clone + PartialEq,
-    {
-        let subject = signature.subject.clone();
-        if self.collected.contains_key(&signature.creator()) {
-            return None;
-        }
-        self.collected.insert(signature.creator(), signature);
-        let partials: Vec<_> = self
-            .collected
-            .values()
-            .filter(|s| s.subject == subject)
-            .map(|s| s.raw.clone())
+    fn aggregate<T: Signable + PartialEq>(
+        &self,
+        subject: T,
+        signatures: Vec<Signature<S, T>>,
+    ) -> Option<QuorumCertificate<S, T>> {
+        let partials: Vec<_> = signatures
+            .into_iter()
+            .filter(|signature| signature.subject == subject)
+            .map(|signature| signature.raw)
             .collect();
-        if (partials.len() as u32) < self.threshold {
+        if partials.len() < self.threshold as usize {
             return None;
         }
-        let qc = notary.aggregate(subject, partials.into_iter()).ok()?;
-        self.ready = true;
-        Some(qc)
+        self.notary.aggregate(subject, partials.into_iter()).ok()
     }
 }

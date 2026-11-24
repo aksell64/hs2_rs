@@ -191,7 +191,9 @@ impl<S: Scheme, C: Command, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: L
         match task {
             Task::Pacemaker(input) => self.call_pacemaker(storage, input, result),
             Task::Consensus(input) => self.call_consensus(storage, input),
-            Task::Collector(input) => Ok(Some(TaskOut::Collector(self.collector.apply(input)))),
+            Task::Collector(input) => {
+                Ok(Some(TaskOut::Collector(self.collector.apply(storage, input)?)))
+            }
             Task::StoreBlock(block) => {
                 storage.insert_block(&block)?;
                 Ok(None)

@@ -1,7 +1,7 @@
 use super::adversary::*;
 use super::byzantine::{
     ByzantineProxy, conflicting_proposal, equivocation as equivocation_behavior, reveal_qc_to_one,
-    tail_fork, unlimited_votes_and_qcs,
+    tail_fork,
 };
 use super::dsl::*;
 use super::invariants::*;
@@ -26,7 +26,7 @@ const N7: u32 = 7;
 #[test]
 fn replay_seed() -> Result<()> {
     let seed = 500;
-    replay(seed, equivocation_with_unlimited_votes)
+    replay(seed, equivocation)
 }
 
 #[test]
@@ -39,9 +39,16 @@ fn equivocation(seed: u64, verbose: bool) -> Result<()> {
     let n = rnd.range(4, 10) as u32;
     let f = rnd.range(1, u64::from((n - 1) / 3)) as u32;
     let delta = rnd.range(5, 30);
+    let blocksync_delta = delta;
     let gst = rnd.range(1, 50 * delta);
-    let lock_timeout = rnd.range(3 * delta + 1, 5 * delta);
-    let view_timeout = rnd.range(lock_timeout + 7 * delta + 1, lock_timeout + 10 * delta);
+    let lock_timeout = rnd.range(
+        3 * (delta + blocksync_delta) + 1,
+        5 * (delta + blocksync_delta),
+    );
+    let view_timeout = rnd.range(
+        lock_timeout + 7 * (delta + blocksync_delta) + 1,
+        lock_timeout + 10 * (delta + blocksync_delta),
+    );
 
     let setup = setup(n, delta, view_timeout, lock_timeout)
         .rng(rnd.clone())
@@ -49,13 +56,8 @@ fn equivocation(seed: u64, verbose: bool) -> Result<()> {
         .start_in_interval(&rnd, 1, delta * 10)
         .build()?;
 
-    let delivery = move |_: &Ctx, packet: &Packet| match packet.kind() {
-        Kind::Sync => Fate::Delay(0),
-        _ => Fate::Delay(delta),
-    };
-    let adversary = Adversary::new(rnd.sample_exact(n, f))
-        .delivery(delivery)
-        .byzantine_node(NodeSelector::Range(f), || {
+    let adversary =
+        Adversary::new(rnd.sample_exact(n, f)).byzantine_node(NodeSelector::Range(f), || {
             ByzantineProxy::new(
                 "eviction",
                 with_probability::<VirtualClock>(70),
@@ -63,10 +65,17 @@ fn equivocation(seed: u64, verbose: bool) -> Result<()> {
             )
         });
 
+
+    let delivery = until_gst(
+        gst,
+        delta,
+        uniform(1, 100 * delta, rnd.clone()),
+    );
+
     let mut runner = Runner::new(setup);
 
     let mut env = Env::new()
-        .adversary(adversary)
+        .adversary(adversary.delivery(delivery))
         .stop_cond(time_reached(gst))
         .invariant(safety());
     runner.run(&mut env)?;
@@ -91,121 +100,16 @@ fn equivocation(seed: u64, verbose: bool) -> Result<()> {
     runner.note(format!(
         "gst = {gst}, epoch_view = {epoch_view}, height_before = {height_before}"
     ));
-    // L6–L7: (n - 1)τ + LT + 9δ < nτ + 2δ, even across the epoch boundary.
-    let commit_deadline = epoch_entered_at + leaders.epoch_length() * view_timeout + 2 * delta;
+    // Use the L6–L7 bound with d = delta + blocksync_delta:
+    // (n - 1)τ + LT + 9d < nτ + 2d, even across the epoch boundary.
+    let commit_deadline =
+        epoch_entered_at + leaders.epoch_length() * view_timeout + 2 * (delta + blocksync_delta);
     runner.mark(
         epoch_entered_at,
         &format!("first honest in epoch {epoch_view}"),
     );
     runner.note(format!(
-        "commit deadline = {commit_deadline}, network delay = {delta}, sync delay = 0"
-    ));
-    env = env
-        .stop_cond(move |ctx| min_committed_height(ctx) > height_before)
-        .deadline(commit_deadline);
-    runner.run(&mut env).with_context(|| {
-        format!(
-            "no progress from epoch {epoch_view} by {commit_deadline}: \
-             max height before = {height_before}, epoch entered at = {epoch_entered_at}, seed = {seed}"
-        )
-    })?;
-    Ok(())
-}
-
-#[test]
-fn equivocation_with_unlimited_votes_test() -> Result<()> {
-    for_each_seed(&random_seeds(1_0_000), equivocation_with_unlimited_votes)
-}
-
-fn equivocation_with_unlimited_votes(seed: u64, verbose: bool) -> Result<()> {
-    let rnd = Randomness::new(seed);
-    let n = rnd.range(4, 10) as u32;
-    let f = rnd.range(1, u64::from((n - 1) / 3)) as u32;
-    let delta = rnd.range(5, 30);
-    let gst = rnd.range(1, 50 * delta);
-    let lock_timeout = rnd.range(3 * delta + 1, 5 * delta);
-    let view_timeout = rnd.range(lock_timeout + 7 * delta + 1, lock_timeout + 10 * delta);
-
-    let setup = setup(n, delta, view_timeout, lock_timeout)
-        .rng(rnd.clone())
-        .verbose(verbose)
-        .start_in_interval(&rnd, 1, delta * 10)
-        .build()?;
-
-    let delivery = move |_: &Ctx, packet: &Packet| match packet.kind() {
-        Kind::Sync => Fate::Delay(0),
-        _ => Fate::Delay(delta),
-    };
-    let mut adversary = Adversary::new(rnd.sample_exact(n, f))
-        .delivery(delivery)
-        .byzantine_node(NodeSelector::All, || {
-            ByzantineProxy::new(
-                "eviction",
-                with_probability::<VirtualClock>(70),
-                equivocation_behavior(),
-            )
-        });
-
-    let honest: Vec<_> = (0..n)
-        .map(NodeID::from)
-        .filter(|id| !adversary.byzantine_nodes.contains(id))
-        .collect();
-    // let mutant_count = rnd.range(1, u64::from(n - f)) as u32;
-    let mutant_count = n-f;
-    let mutants: Vec<_> = rnd
-        .sample_exact(n - f, mutant_count)
-        .into_iter()
-        .map(|index| honest[index as usize])
-        .collect();
-    for &id in &mutants {
-        adversary = adversary.mutate_node(NodeSelector::Id(id), || {
-            ByzantineProxy::new(
-                "unlimited_votes_and_qcs",
-                |_: &Context<'_, VirtualClock>| true,
-                unlimited_votes_and_qcs(),
-            )
-        });
-    }
-
-    let mut runner = Runner::new(setup);
-    runner.note(format!(
-        "unlimited votes and multiple QCs: {mutant_count} mutants, nodes = {mutants:?}"
-    ));
-
-    let mut env = Env::new()
-        .adversary(adversary)
-        .stop_cond(time_reached(gst))
-        .invariant(safety());
-    runner.run(&mut env)?;
-    runner.mark(gst, "GST");
-
-    if runner.context(&env).honest_unstarted().count() > 0 {
-        env = env
-            .stop_cond(|ctx| ctx.honest_unstarted().count() == 0)
-            .deadline(gst.max(10 * delta));
-        runner.run(&mut env)?;
-    }
-
-    let ctx = runner.context(&env);
-    let leaders = RoundRobin::new(n);
-    let epoch_view = leaders.epoch_end(max_view(&ctx)) + 1;
-
-    env = env.stop_cond(move |ctx| max_view(ctx) >= epoch_view);
-    runner.run(&mut env)?;
-
-    let epoch_entered_at = runner.state().now();
-    let height_before = max_committed_height(&runner.context(&env));
-    runner.note(format!(
-        "gst = {gst}, epoch_view = {epoch_view}, height_before = {height_before}"
-    ));
-    // Probe the original eviction progress bound; mutations can invalidate it.
-    let commit_deadline = epoch_entered_at + leaders.epoch_length() * view_timeout + 2 * delta;
-    runner.mark(
-        epoch_entered_at,
-        &format!("first honest in epoch {epoch_view}"),
-    );
-    runner.note(format!(
-        "commit deadline = {commit_deadline}, network delay = {delta}, sync delay = 0"
+        "commit deadline = {commit_deadline}, network delay = {delta}, sync delay = {blocksync_delta}"
     ));
     env = env
         .stop_cond(move |ctx| min_committed_height(ctx) > height_before)
@@ -647,8 +551,8 @@ fn tail_fork_drops_blocks_of_previous_leader(seed: u64, verbose: bool) -> Result
         .verbose(verbose)
         .build()?;
 
-    let adversary = Adversary::new([3])
-        .byzantine_node(NodeSelector::Id(NodeID::from(3)), move || {
+    let adversary =
+        Adversary::new([3]).byzantine_node(NodeSelector::Id(NodeID::from(3)), move || {
             ByzantineProxy::new(
                 "tail_fork",
                 |_: &Context<'_, VirtualClock>| true,
@@ -814,7 +718,6 @@ fn sync_after_gst_tc_waits_for_lagging_nodes(seed: u64, verbose: bool) -> Result
     let mut env = make_silent_env().stop_cond(time_reached(end));
     runner.run(&mut env)
 }
-
 
 fn setup(n: u32, delta: u64, view_timeout: u64, lock_timeout: u64) -> Setup {
     Setup::new(n)

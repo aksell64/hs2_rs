@@ -31,6 +31,7 @@ impl<K: Ord, V> Default for MemoryKV<K, V> {
 pub enum MemoryOp<K, V> {
     Set(K, V),
     Remove(K),
+    RemoveRange(K, K),
 }
 
 pub struct MemoryBatch<K, V> {
@@ -44,6 +45,10 @@ impl<K, V> KVBatch<K, V> for MemoryBatch<K, V> {
 
     fn remove(&mut self, key: K) {
         self.ops.push(MemoryOp::Remove(key));
+    }
+
+    fn remove_range(&mut self, from: K, to: K) {
+        self.ops.push(MemoryOp::RemoveRange(from, to));
     }
 }
 
@@ -104,6 +109,13 @@ where
                 }
                 MemoryOp::Remove(key) => {
                     map.remove(&key);
+                }
+                MemoryOp::RemoveRange(from, to) => {
+                    if from < to {
+                        let mut removed = map.split_off(&from);
+                        let mut remaining = removed.split_off(&to);
+                        map.append(&mut remaining);
+                    }
                 }
             }
         }

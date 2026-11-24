@@ -32,7 +32,7 @@ Event-driven Chained HotStuff-2 (for replica u)
 
 // ───────────────────────── Consensus ─────────────────────────
 
-upon NewProposal(msg_v(generic, b_new, view))
+upon NewProposal(proposalMsg_v(generic, b_new, view))
     if v ≠ getLeader(view) then return
     if ¬verifyQC(b_new.justify) then return
     onReceiveQC(b_new.justify)
@@ -76,7 +76,7 @@ procedure tryPropose()
 
 procedure onPropose(cmd)
     b_new ← createLeaf(qc_high.node, cmd, qc_high, qc_high.node.height + 1)
-    broadcast(msg_u(generic, b_new, curView))
+    broadcast(proposalMsg_u(generic, b_new, curView))
 
 function createLeaf(parent, cmd, qc, height)
     b.parent ← parent; b.cmd ← cmd
@@ -95,15 +95,15 @@ upon ViewTimerFired(v)
         if ¬sentWish[v + 1] then
             sentWish[v + 1] ← true
             σ ← createThresholdShare(⟨wish, v + 1⟩)
-            send ⟨wish, v + 1, σ⟩ to epochLeaders(v + 1)
+            send wishMsg_u(v + 1, σ) to epochLeaders(v + 1)
 
-upon NewWish(m = ⟨wish, v', σ⟩ from p)
-    if u ∉ epochLeaders(v') then return
-    if ¬verifyShare(σ, ⟨wish, v'⟩, p) then return
-    if ∃⟨p, σ'⟩ ∈ W[v'] then return
-    W[v'] ← W[v'] ∪ {⟨p, σ⟩}
-    if |W[v']| ≥ 2f + 1 then
-        tc ← TC(v', {σ | ⟨p, σ⟩ ∈ W[v']})
+upon NewWish(m = wishMsg_v(view, σ))
+    if u ∉ epochLeaders(view) then return
+    if ¬verifyShare(σ, ⟨wish, view⟩, v) then return
+    if ∃⟨v, σ'⟩ ∈ W[view] then return
+    W[view] ← W[view] ∪ {⟨v, σ⟩}
+    if |W[view]| ≥ 2f + 1 then
+        tc ← TC(view, {σ | ⟨p, σ⟩ ∈ W[view]})
         processTC(tc)
 
 upon NewTC(tc)
