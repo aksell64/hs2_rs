@@ -1,7 +1,11 @@
 use crate::network::message::Envelope;
+use crate::protocol::collector::Collector;
+use crate::protocol::consensus::Consensus;
 use crate::protocol::driver::{Driver, DriverInput};
 use crate::protocol::leaders::LeaderPolicy;
+use crate::protocol::pacemaker::Pacemaker;
 use crate::protocol::timeouts::TimeoutPolicy;
+use crate::protocol::traits;
 use crate::storage::staged::StagedStorage;
 use crate::storage::{KVError, Storage, WriteStorage};
 use crate::timer::service::TimerCommand;
@@ -85,7 +89,7 @@ pub struct NodeState<
     CS: ClockSource,
     LP: LeaderPolicy,
 > {
-    driver: Driver<S, C, TP, CS, LP>,
+    driver: Driver<S, C, Consensus<S>, Pacemaker<S, TP, CS, LP>, Collector<S>>,
     queue: VecDeque<DriverInput<S, C>>,
     db: DB,
     mempool: M,
@@ -144,49 +148,55 @@ impl<
         self.queue.push_back(evt);
     }
 
-    #[cfg(any(test, feature = "testing"))]
-    pub fn storage(&self) -> &DB {
-        &self.db
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub fn storage_mut(&mut self) -> &mut DB {
-        &mut self.db
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub fn pop_input(&mut self) -> Option<DriverInput<S, C>> {
-        self.queue.pop_front()
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub fn push_front_input(&mut self, input: DriverInput<S, C>) {
-        self.queue.push_front(input);
-    }
-
     pub fn apply(&mut self) -> Result<Effects<S, C, CS::Clock>, NodeError> {
+        Self::apply_state(
+            &mut self.driver,
+            &mut self.queue,
+            &mut self.db,
+            &mut self.mempool,
+        )
+    }
+
+    fn apply_state<
+        CO: traits::Consensus<S>,
+        PM: traits::Pacemaker<S, Clock = CS::Clock>,
+        CL: traits::Collector<S>,
+    >(
+        driver: &mut Driver<S, C, CO, PM, CL>,
+        queue: &mut VecDeque<DriverInput<S, C>>,
+        db: &mut DB,
+        mempool: &mut M,
+    ) -> Result<Effects<S, C, CS::Clock>, NodeError> {
         let mut effects = Effects::new();
-        while let Some(new_effects) = self.apply_next()? {
+        while let Some(new_effects) = Self::process_next_input(driver, queue, db, mempool)? {
             effects.merge(new_effects);
         }
         Ok(effects)
     }
 
-    pub fn apply_next(&mut self) -> Result<Option<Effects<S, C, CS::Clock>>, KVError> {
-        let Some(event) = self.queue.pop_front() else {
+    fn process_next_input<
+        CO: traits::Consensus<S>,
+        PM: traits::Pacemaker<S, Clock = CS::Clock>,
+        CL: traits::Collector<S>,
+    >(
+        driver: &mut Driver<S, C, CO, PM, CL>,
+        queue: &mut VecDeque<DriverInput<S, C>>,
+        db: &mut DB,
+        mempool: &mut M,
+    ) -> Result<Option<Effects<S, C, CS::Clock>>, KVError> {
+        let Some(event) = queue.pop_front() else {
             return Ok(None);
         };
 
-        let mut staged = StagedStorage::new(&self.db);
-        let result = self.driver.apply(&mut staged, &mut self.mempool, event)?;
+        let mut staged = StagedStorage::new(&*db);
+        let result = driver.apply(&mut staged, mempool, event)?;
         let batch = staged.into_batch();
-        self.db.commit_write_batch(batch)?;
+        db.commit_write_batch(batch)?;
 
-        self.mempool
-            .on_commands_commit(result.committed.iter().map(|block| &block.cmd));
+        mempool.on_commands_commit(result.committed.iter().map(|block| &block.cmd));
 
         for input in result.replay {
-            self.queue.push_front(input);
+            queue.push_front(input);
         }
 
         Ok(Some(Effects {
@@ -210,5 +220,61 @@ impl<
         batch.update_cur_leader(leaders.leader(0))?;
         batch.update_proposed_view(0)?;
         db.commit_write_batch(batch)
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl<
+    S: Scheme,
+    C: Command,
+    DB: Storage<S, C>,
+    M: Mempool<C>,
+    TP: TimeoutPolicy<CS::Clock>,
+    CS: ClockSource,
+    LP: LeaderPolicy,
+> NodeState<S, C, DB, M, TP, CS, LP>
+{
+    pub fn storage(&self) -> &DB {
+        &self.db
+    }
+
+    pub fn storage_mut(&mut self) -> &mut DB {
+        &mut self.db
+    }
+
+    pub fn pop_input(&mut self) -> Option<DriverInput<S, C>> {
+        self.queue.pop_front()
+    }
+
+    pub fn push_front_input(&mut self, input: DriverInput<S, C>) {
+        self.queue.push_front(input);
+    }
+
+    pub fn force_apply<
+        CO: traits::Consensus<S>,
+        PM: traits::Pacemaker<S, Clock = CS::Clock>,
+        CL: traits::Collector<S>,
+    >(
+        &mut self,
+        input: DriverInput<S, C>,
+        driver: &mut Driver<S, C, CO, PM, CL>,
+    ) -> Result<Effects<S, C, CS::Clock>, KVError> {
+        self.queue.push_front(input);
+        Ok(Self::process_next_input(
+            driver,
+            &mut self.queue,
+            &mut self.db,
+            &mut self.mempool,
+        )?
+        .unwrap_or_else(Effects::new))
+    }
+
+    pub fn apply_next(&mut self) -> Result<Option<Effects<S, C, CS::Clock>>, KVError> {
+        Self::process_next_input(
+            &mut self.driver,
+            &mut self.queue,
+            &mut self.db,
+            &mut self.mempool,
+        )
     }
 }

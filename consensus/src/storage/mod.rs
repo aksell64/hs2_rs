@@ -4,6 +4,7 @@ pub mod staged;
 
 pub use kv::KVError;
 
+use crate::protocol::driver::DriverInput;
 use crate::types::View;
 use crate::types::block::{Block, Command};
 use crate::types::certificate::{BlockQC, SignedVote, SignedWish, TimeoutQC};
@@ -33,6 +34,15 @@ pub trait ReadStorage<S: Scheme, C: Command> {
     fn get_statuses_count(&self, view: View) -> Result<usize, KVError>;
     fn exists_wish(&self, view: View) -> Result<bool, KVError>;
     fn exists_relayed_tc(&self, view: View) -> Result<bool, KVError>;
+    fn get_next_input_id(&self) -> Result<u64, KVError>;
+    fn get_inputs_up_to_view(
+        &self,
+        view: View,
+    ) -> Result<Vec<(View, u64, DriverInput<S, C>)>, KVError>;
+    fn get_inputs_for_block(
+        &self,
+        hash: S::Digest,
+    ) -> Result<Vec<(u64, DriverInput<S, C>)>, KVError>;
     fn get_block_branch(
         &self,
         block: Block<S, C>,
@@ -79,8 +89,63 @@ pub trait WriteStorage<S: Scheme, C: Command> {
     fn clear_statuses(&mut self, view: View) -> Result<(), KVError>;
     fn insert_wish(&mut self, view: View) -> Result<(), KVError>;
     fn insert_relayed_tc(&mut self, view: View) -> Result<(), KVError>;
+    fn update_next_input_id(&mut self, id: u64) -> Result<(), KVError>;
+    fn insert_input_for_view(
+        &mut self,
+        view: View,
+        id: u64,
+        input: &DriverInput<S, C>,
+    ) -> Result<(), KVError>;
+    fn insert_input_for_block(
+        &mut self,
+        hash: S::Digest,
+        id: u64,
+        input: &DriverInput<S, C>,
+    ) -> Result<(), KVError>;
+    fn clear_inputs_up_to_view(&mut self, view: View) -> Result<(), KVError>;
+    fn clear_inputs_for_block(&mut self, hash: S::Digest) -> Result<(), KVError>;
 }
 
-pub trait ReadWriteStorage<S: Scheme, C: Command>: ReadStorage<S, C> + WriteStorage<S, C> {}
+pub trait ReadWriteStorage<S: Scheme, C: Command>: ReadStorage<S, C> + WriteStorage<S, C> {
+    fn buffer_for_view(&mut self, view: View, input: DriverInput<S, C>) -> Result<(), KVError> {
+        let id = self.get_next_input_id()?;
+        let next = id.checked_add(1).ok_or_else(|| {
+            KVError::Backend(std::io::Error::other("buffered input sequence exhausted").into())
+        })?;
+        self.insert_input_for_view(view, id, &input)?;
+        self.update_next_input_id(next)
+    }
 
-impl<S: Scheme, C: Command, T: ReadStorage<S, C> + WriteStorage<S, C>> ReadWriteStorage<S, C> for T {}
+    fn buffer_for_block(
+        &mut self,
+        hash: S::Digest,
+        input: DriverInput<S, C>,
+    ) -> Result<(), KVError> {
+        let id = self.get_next_input_id()?;
+        let next = id.checked_add(1).ok_or_else(|| {
+            KVError::Backend(std::io::Error::other("buffered input sequence exhausted").into())
+        })?;
+        self.insert_input_for_block(hash, id, &input)?;
+        self.update_next_input_id(next)
+    }
+
+    fn take_inputs_up_to_view(&mut self, view: View) -> Result<Vec<DriverInput<S, C>>, KVError> {
+        let inputs = self.get_inputs_up_to_view(view)?;
+        self.clear_inputs_up_to_view(view)?;
+        Ok(inputs.into_iter().map(|(_, _, input)| input).collect())
+    }
+
+    fn take_inputs_for_block(
+        &mut self,
+        hash: S::Digest,
+    ) -> Result<Vec<DriverInput<S, C>>, KVError> {
+        let inputs = self.get_inputs_for_block(hash)?;
+        self.clear_inputs_for_block(hash)?;
+        Ok(inputs.into_iter().map(|(_, input)| input).collect())
+    }
+}
+
+impl<S: Scheme, C: Command, T: ReadStorage<S, C> + WriteStorage<S, C>> ReadWriteStorage<S, C>
+    for T
+{
+}

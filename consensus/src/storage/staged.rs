@@ -1,3 +1,4 @@
+use crate::protocol::driver::DriverInput;
 use crate::storage::{KVError, ReadStorage, Storage, WriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command};
@@ -28,6 +29,11 @@ pub struct StagedStorage<'a, S: Scheme, C: Command, DB: Storage<S, C>> {
     cleared_statuses: HashSet<View>,
     wishes: HashSet<View>,
     relayed_tc: HashSet<View>,
+    next_input_id: Option<u64>,
+    inputs_by_view: BTreeMap<(View, u64), DriverInput<S, C>>,
+    inputs_by_block: HashMap<S::Digest, BTreeMap<u64, DriverInput<S, C>>>,
+    cleared_input_views: Option<View>,
+    cleared_input_blocks: HashSet<S::Digest>,
 }
 
 impl<'a, S: Scheme, C: Command, DB: Storage<S, C>> StagedStorage<'a, S, C, DB> {
@@ -54,6 +60,11 @@ impl<'a, S: Scheme, C: Command, DB: Storage<S, C>> StagedStorage<'a, S, C, DB> {
             cleared_statuses: HashSet::new(),
             wishes: HashSet::new(),
             relayed_tc: HashSet::new(),
+            next_input_id: None,
+            inputs_by_view: BTreeMap::new(),
+            inputs_by_block: HashMap::new(),
+            cleared_input_views: None,
+            cleared_input_blocks: HashSet::new(),
         }
     }
 
@@ -247,6 +258,62 @@ impl<S: Scheme, C: Command, DB: Storage<S, C>> ReadStorage<S, C> for StagedStora
         }
         Ok(count)
     }
+
+    fn get_next_input_id(&self) -> Result<u64, KVError> {
+        match self.next_input_id {
+            Some(id) => Ok(id),
+            None => self.storage.get_next_input_id(),
+        }
+    }
+
+    fn get_inputs_up_to_view(
+        &self,
+        view: View,
+    ) -> Result<Vec<(View, u64, DriverInput<S, C>)>, KVError> {
+        let mut inputs = if self
+            .cleared_input_views
+            .is_some_and(|cleared| view <= cleared)
+        {
+            BTreeMap::new()
+        } else {
+            self.storage
+                .get_inputs_up_to_view(view)?
+                .into_iter()
+                .filter(|(view, _, _)| {
+                    self.cleared_input_views
+                        .is_none_or(|cleared| *view > cleared)
+                })
+                .map(|(view, id, input)| ((view, id), input))
+                .collect()
+        };
+        inputs.extend(
+            self.inputs_by_view
+                .range(..=(view, u64::MAX))
+                .map(|(&key, input)| (key, input.clone())),
+        );
+        Ok(inputs
+            .into_iter()
+            .map(|((view, id), input)| (view, id, input))
+            .collect())
+    }
+
+    fn get_inputs_for_block(
+        &self,
+        hash: S::Digest,
+    ) -> Result<Vec<(u64, DriverInput<S, C>)>, KVError> {
+        let mut inputs: BTreeMap<_, _> = if self.cleared_input_blocks.contains(&hash) {
+            BTreeMap::new()
+        } else {
+            self.storage
+                .get_inputs_for_block(hash)?
+                .into_iter()
+                .collect()
+        };
+        if let Some(pending) = self.inputs_by_block.get(&hash) {
+            inputs.extend(pending.iter().map(|(&id, input)| (id, input.clone())));
+        }
+        Ok(inputs.into_iter().collect())
+    }
 }
 
 impl<S: Scheme, C: Command, DB: Storage<S, C>> WriteStorage<S, C> for StagedStorage<'_, S, C, DB> {
@@ -364,6 +431,55 @@ impl<S: Scheme, C: Command, DB: Storage<S, C>> WriteStorage<S, C> for StagedStor
     fn insert_relayed_tc(&mut self, view: View) -> Result<(), KVError> {
         self.batch.insert_relayed_tc(view)?;
         self.relayed_tc.insert(view);
+        Ok(())
+    }
+
+    fn update_next_input_id(&mut self, id: u64) -> Result<(), KVError> {
+        self.batch.update_next_input_id(id)?;
+        self.next_input_id = Some(id);
+        Ok(())
+    }
+
+    fn insert_input_for_view(
+        &mut self,
+        view: View,
+        id: u64,
+        input: &DriverInput<S, C>,
+    ) -> Result<(), KVError> {
+        self.batch.insert_input_for_view(view, id, input)?;
+        self.inputs_by_view.insert((view, id), input.clone());
+        Ok(())
+    }
+
+    fn insert_input_for_block(
+        &mut self,
+        hash: S::Digest,
+        id: u64,
+        input: &DriverInput<S, C>,
+    ) -> Result<(), KVError> {
+        self.batch.insert_input_for_block(hash, id, input)?;
+        self.inputs_by_block
+            .entry(hash)
+            .or_default()
+            .insert(id, input.clone());
+        Ok(())
+    }
+
+    fn clear_inputs_up_to_view(&mut self, view: View) -> Result<(), KVError> {
+        self.batch.clear_inputs_up_to_view(view)?;
+        self.inputs_by_view
+            .retain(|(input_view, _), _| *input_view > view);
+        self.cleared_input_views = Some(
+            self.cleared_input_views
+                .map_or(view, |cleared| cleared.max(view)),
+        );
+        Ok(())
+    }
+
+    fn clear_inputs_for_block(&mut self, hash: S::Digest) -> Result<(), KVError> {
+        self.batch.clear_inputs_for_block(hash)?;
+        self.inputs_by_block.remove(&hash);
+        self.cleared_input_blocks.insert(hash);
         Ok(())
     }
 }

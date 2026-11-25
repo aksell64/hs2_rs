@@ -1,3 +1,4 @@
+use crate::protocol::driver::DriverInput;
 use crate::storage::kv::{KV, KVBatch};
 use crate::storage::{KVError, ReadStorage, Storage, WriteStorage};
 use crate::types::View;
@@ -28,6 +29,9 @@ const VOTE: u8 = 17;
 const WISH_VOTE: u8 = 18;
 const VOTE_BLOCK: u8 = 19;
 const WISH_VOTE_SENDER: u8 = 20;
+const NEXT_INPUT_ID: u8 = 21;
+const INPUT_BY_VIEW: u8 = 22;
+const INPUT_BY_BLOCK: u8 = 23;
 
 fn key(tag: u8, suffix: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + suffix.len());
@@ -48,6 +52,20 @@ fn view_range(tag: u8, view: View) -> (Vec<u8>, Vec<u8>) {
         Some(next_view) => key(tag, &next_view.to_be_bytes()),
         None => key(tag + 1, &[]),
     };
+    (from, to)
+}
+
+fn input_key(tag: u8, group: &[u8], id: u64) -> Vec<u8> {
+    let mut key = key(tag, group);
+    key.extend_from_slice(&id.to_be_bytes());
+    key
+}
+
+fn block_input_range(hash: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let from = key(INPUT_BY_BLOCK, &hash.encode());
+    let mut to = from.clone();
+    to.extend_from_slice(&u64::MAX.to_be_bytes());
+    to.push(0);
     (from, to)
 }
 
@@ -216,6 +234,52 @@ where
             Ok(count + 1)
         })
     }
+
+    fn get_next_input_id(&self) -> Result<u64, KVError> {
+        Ok(self.get(key(NEXT_INPUT_ID, &[]))?.unwrap_or(0))
+    }
+
+    fn get_inputs_up_to_view(
+        &self,
+        view: View,
+    ) -> Result<Vec<(View, u64, DriverInput<S, C>)>, KVError> {
+        let from = key(INPUT_BY_VIEW, &[]);
+        let (_, to) = view_range(INPUT_BY_VIEW, view);
+        let mut inputs = Vec::new();
+        for item in self.kv.range(&from, &to)? {
+            let item = item?;
+            let (view, id): ([u8; 8], [u8; 8]) =
+                DecodeAll::decode_all(&mut &item.key[1..]).map_err(|_| KVError::Corruption {
+                    key: item.key.clone(),
+                })?;
+            let input = DriverInput::decode_all(&mut &item.value[..])
+                .map_err(|_| KVError::Corruption { key: item.key })?;
+            inputs.push((View::from_be_bytes(view), u64::from_be_bytes(id), input));
+        }
+        inputs.sort_by_key(|(view, id, _)| (*view, *id));
+        Ok(inputs)
+    }
+
+    fn get_inputs_for_block(
+        &self,
+        hash: S::Digest,
+    ) -> Result<Vec<(u64, DriverInput<S, C>)>, KVError> {
+        let (from, to) = block_input_range(hash.as_ref());
+        let mut inputs = Vec::new();
+        for item in self.kv.range(&from, &to)? {
+            let item = item?;
+            let id: [u8; 8] = DecodeAll::decode_all(&mut &item.key[from.len()..]).map_err(|_| {
+                KVError::Corruption {
+                    key: item.key.clone(),
+                }
+            })?;
+            let input = DriverInput::decode_all(&mut &item.value[..])
+                .map_err(|_| KVError::Corruption { key: item.key })?;
+            inputs.push((u64::from_be_bytes(id), input));
+        }
+        inputs.sort_by_key(|(id, _)| *id);
+        Ok(inputs)
+    }
 }
 
 impl<S, C, K> Storage<S, C> for KVStorage<K>
@@ -346,6 +410,41 @@ where
 
     fn insert_relayed_tc(&mut self, view: View) -> Result<(), KVError> {
         self.put(key(RELAYED_TC, &view.to_be_bytes()), ())
+    }
+
+    fn update_next_input_id(&mut self, id: u64) -> Result<(), KVError> {
+        self.put(key(NEXT_INPUT_ID, &[]), id)
+    }
+
+    fn insert_input_for_view(
+        &mut self,
+        view: View,
+        id: u64,
+        input: &DriverInput<S, C>,
+    ) -> Result<(), KVError> {
+        self.put(input_key(INPUT_BY_VIEW, &view.to_be_bytes(), id), input)
+    }
+
+    fn insert_input_for_block(
+        &mut self,
+        hash: S::Digest,
+        id: u64,
+        input: &DriverInput<S, C>,
+    ) -> Result<(), KVError> {
+        self.put(input_key(INPUT_BY_BLOCK, &hash.as_ref().encode(), id), input)
+    }
+
+    fn clear_inputs_up_to_view(&mut self, view: View) -> Result<(), KVError> {
+        let from = key(INPUT_BY_VIEW, &[]);
+        let (_, to) = view_range(INPUT_BY_VIEW, view);
+        self.0.remove_range(from, to);
+        Ok(())
+    }
+
+    fn clear_inputs_for_block(&mut self, hash: S::Digest) -> Result<(), KVError> {
+        let (from, to) = block_input_range(hash.as_ref());
+        self.0.remove_range(from, to);
+        Ok(())
     }
 }
 

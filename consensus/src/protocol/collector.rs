@@ -120,3 +120,13 @@ impl<S: Scheme> Collector<S> {
         self.notary.aggregate(subject, partials.into_iter()).ok()
     }
 }
+
+impl<S: Scheme> crate::protocol::traits::Collector<S> for Collector<S> {
+    fn apply<C: Command, DB: ReadWriteStorage<S, C>>(
+        &mut self,
+        storage: &mut DB,
+        event: CollectorInput<S>,
+    ) -> Result<CollectorOutput<S>, KVError> {
+        Collector::apply(self, storage, event)
+    }
+}

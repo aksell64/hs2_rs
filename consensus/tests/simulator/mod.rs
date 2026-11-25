@@ -11,3 +11,4 @@ mod invariants;
 mod adversary;
 mod runner;
 mod byzantine;
+mod byzantine_behaivors;

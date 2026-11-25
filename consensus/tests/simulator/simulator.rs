@@ -176,6 +176,10 @@ impl<CS: ClockSource> GlobalState<CS> {
         self.committee_size
     }
 
+    pub fn clock(&self) -> &CS {
+        &self.clock
+    }
+
     pub fn now(&self) -> CS::Clock {
         self.timeline.now()
     }

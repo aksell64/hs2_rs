@@ -10,6 +10,7 @@ use crate::types::certificate::{BlockQC, TimeoutQC};
 use crate::types::clock::{Clock, ClockSource};
 use crate::types::crypto::Notary;
 use crate::types::wish::Wish;
+use codec::{Decode, Encode};
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
 
@@ -21,13 +22,13 @@ pub enum PacemakerInput<S: Scheme> {
     ReceivedStatus(Status<S>),
 }
 
+#[derive(Encode, Decode)]
 pub struct Status<S: Scheme> {
     pub sender: NodeID,
     pub qc: BlockQC<S>,
     pub view: View,
 }
 
-#[cfg(any(test, feature = "testing"))]
 impl<S: Scheme> Clone for Status<S> {
     fn clone(&self) -> Self {
         Self {
@@ -277,5 +278,31 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
             storage.insert_status(status.sender, status.view)?;
         }
         Ok(result)
+    }
+}
+
+impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
+    crate::protocol::traits::Pacemaker<S> for Pacemaker<S, TP, CS, LP>
+{
+    type Clock = CS::Clock;
+
+    fn apply<C: Command, DB: ReadWriteStorage<S, C>>(
+        &mut self,
+        storage: &mut DB,
+        event: PacemakerInput<S>,
+    ) -> PacemakerApply<S, C, Self::Clock> {
+        Pacemaker::apply(self, storage, event)
+    }
+
+    fn leader(&self, view: View) -> NodeID {
+        Pacemaker::leader(self, view)
+    }
+
+    fn is_leader(&self, view: View) -> bool {
+        Pacemaker::is_leader(self, view)
+    }
+
+    fn is_epoch_leader(&self, view: View) -> bool {
+        Pacemaker::is_epoch_leader(self, view)
     }
 }

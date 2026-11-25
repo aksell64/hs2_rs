@@ -7,14 +7,15 @@ use hotstuff_consensus::network::message::{Envelope, Message, Recipient};
 use hotstuff_consensus::protocol::collector::{
     CertificateOutput, Collector, CollectorInput, CollectorOutput,
 };
-use hotstuff_consensus::protocol::driver::DriverInput;
+use hotstuff_consensus::protocol::driver::{Driver, DriverInput};
 use hotstuff_consensus::protocol::leaders::{LeaderPolicy, RoundRobin};
+use hotstuff_consensus::protocol::traits;
 use hotstuff_consensus::sm::Effects;
 use hotstuff_consensus::storage::{ReadStorage, Storage, WriteStorage};
 use hotstuff_consensus::storage::kv_storage::KVStorage;
 use hotstuff_consensus::storage::staged::StagedStorage;
 use hotstuff_consensus::types::View;
-use hotstuff_consensus::types::block::{Block, Proposal};
+use hotstuff_consensus::types::block::Block;
 use hotstuff_consensus::types::clock::ClockSource;
 use hotstuff_consensus::types::crypto::Notary;
 use hotstuff_types::node::NodeID;
@@ -126,6 +127,18 @@ impl<'a, CS: ClockSource> ByzantineContext<'a, CS> {
     pub fn apply_as_honest(&mut self, input: Input) -> Result<NodeEffects<CS>> {
         self.replica.push_front_input(input);
         Ok(self.replica.apply_next()?.unwrap_or_else(no_effects))
+    }
+
+    pub fn force_apply<
+        CO: traits::Consensus<TestScheme>,
+        PM: traits::Pacemaker<TestScheme, Clock = CS::Clock>,
+        CL: traits::Collector<TestScheme>,
+    >(
+        &mut self,
+        input: Input,
+        driver: &mut Driver<TestScheme, TestCommand, CO, PM, CL>,
+    ) -> Result<NodeEffects<CS>> {
+        Ok(self.replica.force_apply(input, driver)?)
     }
 
     pub fn inject(&mut self, input: Input) {
@@ -240,7 +253,6 @@ pub fn unlimited_votes_and_qcs<CS: ClockSource>()
         }
         let storage: &dyn ReadStorage<TestScheme, TestCommand> = ctx.storage();
         if vote.view() > storage.get_cur_view()? {
-            // The driver's keeper will replay this vote once the node reaches its view.
             return ctx.apply_as_honest(DriverInput::NewVote(vote));
         }
 
@@ -262,81 +274,50 @@ pub fn unlimited_votes_and_qcs<CS: ClockSource>()
 
 pub fn equivocation<CS: ClockSource>()
 -> impl FnMut(&mut ByzantineContext<'_, CS>, Input) -> Result<NodeEffects<CS>> {
-    |ctx, input| -> Result<NodeEffects<CS>> {
-        let effects = ctx.apply_as_honest(input)?;
-        let storage: &dyn ReadStorage<TestScheme, TestCommand> = ctx.storage();
-        let cur_view = storage.get_cur_view()?;
-        // Proposals can also be produced by replayed QCs, not just timer inputs.
-        let Some(block_a) = effects.net.iter().find_map(|envelope| match &envelope.msg {
-            Message::ProposalMsg(proposal) if proposal.view == cur_view => {
-                Some(proposal.block.clone())
-            }
-            _ => None,
-        }) else {
-            return Ok(effects);
-        };
+    |ctx, input| {
+        let mut effects = ctx.apply_as_honest(input)?;
+        let committee_size = ctx.state().committee_size();
         let notary = Notary::new(Arc::new(TestScheme {
-            n: ctx.state().committee_size(),
+            n: committee_size,
             id: None,
         }));
-        let (cmd_b, hash_b) = loop {
-            let cmd = TestCommand(ctx.randomness.rand());
-            let hash = notary.block_hash(&block_a.parent, &cmd, &block_a.justify, block_a.height);
-            if hash != block_a.hash {
-                break (cmd, hash);
-            }
-        };
-        let block_b = Block {
-            parent: block_a.parent,
-            cmd: cmd_b,
-            justify: block_a.justify.clone(),
-            height: block_a.height,
-            hash: hash_b,
-        };
 
-        let Effects {
-            net,
-            timers,
-            sync,
-            committed,
-        } = effects;
-        let mut effects = Effects {
-            net: net.into_iter().filter(|envelope| {
-                !matches!(&envelope.msg, Message::ProposalMsg(proposal) if proposal.view == cur_view)
-            }).collect(),
-            timers,
-            sync,
-            committed,
-        };
-        for id in (0..ctx.state().committee_size()).map(NodeID::from) {
-            let (mut send_a, mut send_b) = match ctx.randomness.range(0, 2) {
-                0 => (true, false),
-                1 => (false, true),
-                _ => (true, true),
+        for envelope in std::mem::take(&mut effects.net) {
+            let Message::ProposalMsg(proposal) = &envelope.msg else {
+                effects.net.push(envelope);
+                continue;
             };
 
-            // one test only
-            send_a = true;
-            send_b = true;
-            if send_a {
-                effects.net.push(Envelope {
-                    to: Recipient::Node(id),
-                    msg: Message::ProposalMsg(Proposal {
-                        block: block_a.clone(),
-                        view: cur_view,
-                    }),
-                });
+            let mut conflicting = proposal.clone();
+            loop {
+                conflicting.block.cmd = TestCommand(ctx.randomness.rand());
+                conflicting.block.hash = notary.block_hash(
+                    &conflicting.block.parent,
+                    &conflicting.block.cmd,
+                    &conflicting.block.justify,
+                    conflicting.block.height,
+                );
+                if conflicting.block.hash != proposal.block.hash {
+                    break;
+                }
             }
-            if send_b {
+
+            let recipients: Vec<_> = match envelope.to {
+                Recipient::All => (0..committee_size).map(NodeID::from).collect(),
+                Recipient::Node(id) => vec![id],
+            };
+            for id in recipients {
                 effects.net.push(Envelope {
                     to: Recipient::Node(id),
-                    msg: Message::ProposalMsg(Proposal {
-                        block: block_b.clone(),
-                        view: cur_view,
-                    }),
+                    msg: Message::ProposalMsg(proposal.clone()),
+                });
+                effects.net.push(Envelope {
+                    to: Recipient::Node(id),
+                    msg: Message::ProposalMsg(conflicting.clone()),
                 });
             }
         }
+
         Ok(effects)
     }
 }

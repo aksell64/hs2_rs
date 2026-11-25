@@ -28,7 +28,7 @@ pub struct Consensus<S: Scheme> {
     notary: Notary<S>,
 }
 
-type ConsensusResult<S, C> = Result<Option<ConsensusOutput<S, C>>, KVError>;
+pub type ConsensusResult<S, C> = Result<Option<ConsensusOutput<S, C>>, KVError>;
 
 impl<S: Scheme> Consensus<S> {
     pub fn new(notary: Notary<S>) -> Self {
@@ -60,7 +60,7 @@ impl<S: Scheme> Consensus<S> {
         proposal: Proposal<S, C>,
     ) -> ConsensusResult<S, C> {
         let block = proposal.block;
-        if proposal.view != cur_view || !Self::extends_justify(&*storage, &block)? {
+        if proposal.view != cur_view || !extends_justify(&*storage, &block)? {
             return Ok(None);
         }
         if !self.can_vote(storage, &block, cur_view)? {
@@ -74,19 +74,6 @@ impl<S: Scheme> Consensus<S> {
             },
             block,
         }))
-    }
-
-    pub(crate) fn extends_justify<C: Command, DB: ReadStorage<S, C>>(
-        storage: &DB,
-        block: &Block<S, C>,
-    ) -> Result<bool, KVError> {
-        if block.parent != block.justify.block() {
-            return Ok(false);
-        }
-        Ok(match storage.get_block_by_hash(&block.parent)? {
-            Some(parent) => block.height == parent.height + 1,
-            None => false,
-        })
     }
 
     fn can_vote<C: Command, DB: ReadStorage<S, C>>(
@@ -183,4 +170,29 @@ impl<S: Scheme> Consensus<S> {
             view: request.view,
         })))
     }
+}
+
+impl<S: Scheme> crate::protocol::traits::Consensus<S> for Consensus<S> {
+    fn apply<C: Command, DB: ReadWriteStorage<S, C>>(
+        &mut self,
+        storage: &mut DB,
+        cur_view: View,
+        high_qc: &BlockQC<S>,
+        event: ConsensusInput<S, C>,
+    ) -> ConsensusResult<S, C> {
+        Consensus::apply(self, storage, cur_view, high_qc, event)
+    }
+}
+
+pub(crate) fn extends_justify<S: Scheme, C: Command, DB: ReadStorage<S, C>>(
+    storage: &DB,
+    block: &Block<S, C>,
+) -> Result<bool, KVError> {
+    if block.parent != block.justify.block() {
+        return Ok(false);
+    }
+    Ok(match storage.get_block_by_hash(&block.parent)? {
+        Some(parent) => block.height == parent.height + 1,
+        None => false,
+    })
 }
