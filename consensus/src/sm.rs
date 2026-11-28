@@ -7,8 +7,9 @@ use crate::protocol::pacemaker::Pacemaker;
 use crate::protocol::timeouts::TimeoutPolicy;
 use crate::protocol::traits;
 use crate::storage::staged::StagedStorage;
-use crate::storage::{KVError, Storage, WriteStorage};
+use crate::storage::{KVError, LastEffects, Storage, WriteStorage};
 use crate::timer::service::TimerCommand;
+use crate::timer::service::TimerCommand::SetEpochTimers;
 use crate::types::block::{Block, Command};
 use crate::types::clock::{Clock, ClockSource};
 use crate::types::crypto::Notary;
@@ -60,6 +61,27 @@ pub struct Effects<S: Scheme, C: Command, CL: Clock> {
     pub timers: Vec<TimerCommand<CL>>,
     pub sync: Vec<S::Digest>,
     pub committed: Vec<Block<S, C>>,
+}
+
+impl<S: Scheme, C: Command, CL: Clock> From<&Effects<S, C, CL>> for LastEffects<S, C> {
+    fn from(effects: &Effects<S, C, CL>) -> Self {
+        Self {
+            net: effects.net.clone(),
+            sync: effects.sync.clone(),
+            committed: effects.committed.clone(),
+        }
+    }
+}
+
+impl<S: Scheme, C: Command, CL: Clock> From<LastEffects<S, C>> for Effects<S, C, CL> {
+    fn from(effects: LastEffects<S, C>) -> Self {
+        Self {
+            net: effects.net,
+            timers: Vec::new(),
+            sync: effects.sync,
+            committed: effects.committed,
+        }
+    }
 }
 
 impl<S: Scheme, C: Command, CL: Clock> Effects<S, C, CL> {
@@ -114,30 +136,66 @@ impl<
         timeouts: TP,
         leaders: LP,
         genesis: GenesisConfig<S, C>,
-    ) -> Result<Self, NodeError> {
-        Self::maybe_write_genesis(&notary, &mut db, genesis, &leaders)?;
+    ) -> Result<(Self, Effects<S, C, CS::Clock>), NodeError> {
+        let genesis_block = genesis_block(&notary, genesis).ok_or(NodeError::InvalidGenesis)?;
+        let has_genesis = match db.get_high_qc() {
+            Ok(_) if db.get_block_by_hash(&genesis_block.hash)?.is_some() => Ok(true),
+            Ok(_) => Err(NodeError::GenesisMismatch),
+            Err(KVError::Missing { .. }) => Ok(false),
+            Err(e) => Err(e.into()),
+        }?;
+
+        if has_genesis {
+            return Self::recovery(notary, db, mempool, node_id, source, timeouts, leaders);
+        }
+
+        Self::write_genesis(&mut db, genesis_block, &leaders)?;
+
         let driver = Driver::new(notary, node_id, source, timeouts, leaders);
-        Ok(Self {
-            driver,
-            queue: VecDeque::from([DriverInput::ViewTimerFired(0)]),
-            db,
-            mempool,
-        })
+        Ok((
+            Self {
+                driver,
+                queue: VecDeque::from([DriverInput::ViewTimerFired(0)]),
+                db,
+                mempool,
+            },
+            Effects::new(),
+        ))
     }
 
-    fn maybe_write_genesis(
-        notary: &Notary<S>,
-        db: &mut DB,
-        genesis: GenesisConfig<S, C>,
-        leaders: &LP,
-    ) -> Result<(), NodeError> {
-        let block = genesis_block(notary, genesis).ok_or(NodeError::InvalidGenesis)?;
-        match db.get_high_qc() {
-            Ok(_) if db.get_block_by_hash(&block.hash)?.is_some() => Ok(()),
-            Ok(_) => Err(NodeError::GenesisMismatch),
-            Err(KVError::Missing { .. }) => Ok(Self::write_genesis(db, block, leaders)?),
-            Err(e) => Err(e.into()),
-        }
+    pub fn recovery(
+        notary: Notary<S>,
+        db: DB,
+        mempool: M,
+        node_id: NodeID,
+        source: CS,
+        timeouts: TP,
+        leaders: LP,
+    ) -> Result<(Self, Effects<S, C, CS::Clock>), NodeError> {
+        let mut effects = match db.get_last_effects()? {
+            Some(last_effects) => last_effects.into(),
+            None => Effects::new(),
+        };
+
+        let cur_view = db.get_cur_view()?;
+        let cur_epoch_timeouts = timeouts.epoch_deadlines(
+            leaders.epoch_start(cur_view),
+            cur_view..=leaders.epoch_end(cur_view),
+            source.now(),
+        );
+
+        effects.timers.push(SetEpochTimers(cur_epoch_timeouts));
+
+        let driver = Driver::new(notary, node_id, source, timeouts, leaders);
+        Ok((
+            Self {
+                driver,
+                queue: VecDeque::new(),
+                db,
+                mempool,
+            },
+            effects,
+        ))
     }
 
     pub fn add_command(&mut self, cmd: C) {
@@ -149,12 +207,23 @@ impl<
     }
 
     pub fn apply(&mut self) -> Result<Effects<S, C, CS::Clock>, NodeError> {
-        Self::apply_state(
+        if self.queue.is_empty() {
+            return Ok(Effects::new());
+        }
+
+        let mut staged = StagedStorage::new(&self.db);
+        let effects = Self::apply_state(
             &mut self.driver,
             &mut self.queue,
-            &mut self.db,
+            &mut staged,
             &mut self.mempool,
-        )
+        )?;
+        staged.update_last_effects(&LastEffects::from(&effects))?;
+        let batch = staged.into_batch();
+        self.db.commit_write_batch(batch)?;
+        self.mempool
+            .on_commands_commit(effects.committed.iter().map(|block| &block.cmd));
+        Ok(effects)
     }
 
     fn apply_state<
@@ -164,7 +233,7 @@ impl<
     >(
         driver: &mut Driver<S, C, CO, PM, CL>,
         queue: &mut VecDeque<DriverInput<S, C>>,
-        db: &mut DB,
+        db: &mut StagedStorage<'_, S, C, DB>,
         mempool: &mut M,
     ) -> Result<Effects<S, C, CS::Clock>, NodeError> {
         let mut effects = Effects::new();
@@ -181,19 +250,14 @@ impl<
     >(
         driver: &mut Driver<S, C, CO, PM, CL>,
         queue: &mut VecDeque<DriverInput<S, C>>,
-        db: &mut DB,
+        db: &mut StagedStorage<'_, S, C, DB>,
         mempool: &mut M,
     ) -> Result<Option<Effects<S, C, CS::Clock>>, KVError> {
         let Some(event) = queue.pop_front() else {
             return Ok(None);
         };
 
-        let mut staged = StagedStorage::new(&*db);
-        let result = driver.apply(&mut staged, mempool, event)?;
-        let batch = staged.into_batch();
-        db.commit_write_batch(batch)?;
-
-        mempool.on_commands_commit(result.committed.iter().map(|block| &block.cmd));
+        let result = driver.apply(db, mempool, event)?;
 
         for input in result.replay {
             queue.push_front(input);
@@ -242,6 +306,10 @@ impl<
         &mut self.db
     }
 
+    pub fn into_storage(self) -> DB {
+        self.db
+    }
+
     pub fn pop_input(&mut self) -> Option<DriverInput<S, C>> {
         self.queue.pop_front()
     }
@@ -260,21 +328,34 @@ impl<
         driver: &mut Driver<S, C, CO, PM, CL>,
     ) -> Result<Effects<S, C, CS::Clock>, KVError> {
         self.queue.push_front(input);
-        Ok(Self::process_next_input(
-            driver,
-            &mut self.queue,
-            &mut self.db,
-            &mut self.mempool,
-        )?
-        .unwrap_or_else(Effects::new))
+        let mut staged = StagedStorage::new(&self.db);
+        let effects =
+            Self::process_next_input(driver, &mut self.queue, &mut staged, &mut self.mempool)?
+                .unwrap_or_else(Effects::new);
+        staged.update_last_effects(&LastEffects::from(&effects))?;
+        let batch = staged.into_batch();
+        self.db.commit_write_batch(batch)?;
+        self.mempool
+            .on_commands_commit(effects.committed.iter().map(|block| &block.cmd));
+        Ok(effects)
     }
 
     pub fn apply_next(&mut self) -> Result<Option<Effects<S, C, CS::Clock>>, KVError> {
-        Self::process_next_input(
+        let mut staged = StagedStorage::new(&self.db);
+        let Some(effects) = Self::process_next_input(
             &mut self.driver,
             &mut self.queue,
-            &mut self.db,
+            &mut staged,
             &mut self.mempool,
-        )
+        )?
+        else {
+            return Ok(None);
+        };
+        staged.update_last_effects(&LastEffects::from(&effects))?;
+        let batch = staged.into_batch();
+        self.db.commit_write_batch(batch)?;
+        self.mempool
+            .on_commands_commit(effects.committed.iter().map(|block| &block.cmd));
+        Ok(Some(effects))
     }
 }

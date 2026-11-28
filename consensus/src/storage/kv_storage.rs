@@ -1,6 +1,6 @@
 use crate::protocol::driver::DriverInput;
 use crate::storage::kv::{KV, KVBatch};
-use crate::storage::{KVError, ReadStorage, Storage, WriteStorage};
+use crate::storage::{KVError, LastEffects, ReadStorage, Storage, WriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command};
 use crate::types::certificate::{BlockQC, Signature, SignedVote, SignedWish, TimeoutQC};
@@ -32,6 +32,7 @@ const WISH_VOTE_SENDER: u8 = 20;
 const NEXT_INPUT_ID: u8 = 21;
 const INPUT_BY_VIEW: u8 = 22;
 const INPUT_BY_BLOCK: u8 = 23;
+const LAST_EFFECTS: u8 = 24;
 
 fn key(tag: u8, suffix: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + suffix.len());
@@ -100,10 +101,11 @@ impl<K: KV<Key = Vec<u8>, Value = Vec<u8>>> KVStorage<K> {
         let mut signatures = Vec::new();
         for item in self.kv.range(&from, &to)? {
             let item = item?;
-            let signature = Signature::<S, T>::decode_all(&mut &item.value[..])
-                .map_err(|_| KVError::Corruption {
+            let signature = Signature::<S, T>::decode_all(&mut &item.value[..]).map_err(|_| {
+                KVError::Corruption {
                     key: item.key.clone(),
-                })?;
+                }
+            })?;
             if item.key != view_node_key(tag, view, signature.creator()) {
                 return Err(KVError::Corruption { key: item.key });
             }
@@ -120,6 +122,10 @@ where
     C: Command,
     K: KV<Key = Vec<u8>, Value = Vec<u8>>,
 {
+    fn get_last_effects(&self) -> Result<Option<LastEffects<S, C>>, KVError> {
+        self.get(key(LAST_EFFECTS, &[]))
+    }
+
     fn get_block_by_hash(&self, hash: &S::Digest) -> Result<Option<Block<S, C>>, KVError> {
         self.get(key(BLOCK, hash.as_ref()))
     }
@@ -217,11 +223,15 @@ where
     }
 
     fn exists_wish(&self, view: View) -> Result<bool, KVError> {
-        Ok(self.get::<()>(key(SENT_WISH, &view.to_be_bytes()))?.is_some())
+        Ok(self
+            .get::<()>(key(SENT_WISH, &view.to_be_bytes()))?
+            .is_some())
     }
 
     fn exists_relayed_tc(&self, view: View) -> Result<bool, KVError> {
-        Ok(self.get::<()>(key(RELAYED_TC, &view.to_be_bytes()))?.is_some())
+        Ok(self
+            .get::<()>(key(RELAYED_TC, &view.to_be_bytes()))?
+            .is_some())
     }
 
     fn get_statuses_count(&self, view: View) -> Result<usize, KVError> {
@@ -248,8 +258,8 @@ where
         let mut inputs = Vec::new();
         for item in self.kv.range(&from, &to)? {
             let item = item?;
-            let (view, id): ([u8; 8], [u8; 8]) =
-                DecodeAll::decode_all(&mut &item.key[1..]).map_err(|_| KVError::Corruption {
+            let (view, id): ([u8; 8], [u8; 8]) = DecodeAll::decode_all(&mut &item.key[1..])
+                .map_err(|_| KVError::Corruption {
                     key: item.key.clone(),
                 })?;
             let input = DriverInput::decode_all(&mut &item.value[..])
@@ -268,11 +278,12 @@ where
         let mut inputs = Vec::new();
         for item in self.kv.range(&from, &to)? {
             let item = item?;
-            let id: [u8; 8] = DecodeAll::decode_all(&mut &item.key[from.len()..]).map_err(|_| {
-                KVError::Corruption {
-                    key: item.key.clone(),
-                }
-            })?;
+            let id: [u8; 8] =
+                DecodeAll::decode_all(&mut &item.key[from.len()..]).map_err(|_| {
+                    KVError::Corruption {
+                        key: item.key.clone(),
+                    }
+                })?;
             let input = DriverInput::decode_all(&mut &item.value[..])
                 .map_err(|_| KVError::Corruption { key: item.key })?;
             inputs.push((u64::from_be_bytes(id), input));
@@ -299,7 +310,9 @@ where
     }
 
     fn has_status(&self, node_id: NodeID, view: View) -> Result<bool, KVError> {
-        Ok(self.get::<()>(view_node_key(STATUS, view, node_id))?.is_some())
+        Ok(self
+            .get::<()>(view_node_key(STATUS, view, node_id))?
+            .is_some())
     }
 
     fn get_vote_block(&self, view: View, sender: NodeID) -> Result<Option<S::Digest>, KVError> {
@@ -322,6 +335,10 @@ where
     C: Command,
     B: KVBatch<Vec<u8>, Vec<u8>>,
 {
+    fn update_last_effects(&mut self, effects: &LastEffects<S, C>) -> Result<(), KVError> {
+        self.put(key(LAST_EFFECTS, &[]), effects)
+    }
+
     fn insert_block(&mut self, block: &Block<S, C>) -> Result<(), KVError> {
         self.put(key(BLOCK, block.hash.as_ref()), block)
     }
@@ -431,7 +448,10 @@ where
         id: u64,
         input: &DriverInput<S, C>,
     ) -> Result<(), KVError> {
-        self.put(input_key(INPUT_BY_BLOCK, &hash.as_ref().encode(), id), input)
+        self.put(
+            input_key(INPUT_BY_BLOCK, &hash.as_ref().encode(), id),
+            input,
+        )
     }
 
     fn clear_inputs_up_to_view(&mut self, view: View) -> Result<(), KVError> {
@@ -488,7 +508,10 @@ mod tests {
         assert_eq!(read.get_exec_hash().unwrap(), digest(0));
         assert_eq!(read.get_cur_view().unwrap(), 0);
         assert_eq!(read.get_proposed_view().unwrap(), 0);
-        assert_eq!(read.get_block_by_hash(&digest(0)).unwrap().unwrap().height, 0);
+        assert_eq!(
+            read.get_block_by_hash(&digest(0)).unwrap().unwrap().height,
+            0
+        );
     }
 
     #[test]
@@ -498,7 +521,11 @@ mod tests {
         let mut batch = Storage::<TestScheme, TestCommand>::new_write_batch(&store);
         WriteStorage::<TestScheme, TestCommand>::insert_block(&mut batch, &b1).unwrap();
         WriteStorage::<TestScheme, TestCommand>::update_voted_view(&mut batch, 1).unwrap();
-        WriteStorage::<TestScheme, TestCommand>::update_locked_qc(&mut batch, qc(&scheme, 1, digest(1))).unwrap();
+        WriteStorage::<TestScheme, TestCommand>::update_locked_qc(
+            &mut batch,
+            qc(&scheme, 1, digest(1)),
+        )
+        .unwrap();
 
         let read: &dyn ReadStorage<TestScheme, TestCommand> = &store;
         assert!(read.get_block_by_hash(&digest(1)).unwrap().is_none());
@@ -517,10 +544,16 @@ mod tests {
     fn missing_and_corrupted_values_are_errors() {
         let store: Store = KVStorage::new(MemoryKV::new());
         let read: &dyn ReadStorage<TestScheme, TestCommand> = &store;
-        assert!(matches!(read.get_voted_view(), Err(KVError::Missing { .. })));
+        assert!(matches!(
+            read.get_voted_view(),
+            Err(KVError::Missing { .. })
+        ));
 
         store.kv.set(key(VOTED_VIEW, &[]), vec![1, 2, 3]).unwrap();
         let read: &dyn ReadStorage<TestScheme, TestCommand> = &store;
-        assert!(matches!(read.get_voted_view(), Err(KVError::Corruption { .. })));
+        assert!(matches!(
+            read.get_voted_view(),
+            Err(KVError::Corruption { .. })
+        ));
     }
 }

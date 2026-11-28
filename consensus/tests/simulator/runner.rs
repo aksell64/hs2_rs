@@ -1,5 +1,5 @@
 use crate::simulator::adversary::{Adversary, DeliveryPolicy, StableDelay};
-use crate::simulator::simulator::{Context, GlobalState, ManualClock, Simulator};
+use crate::simulator::simulator::{Context, GlobalState, ManualClock, NodeStorage, Simulator};
 use anyhow::{Context as _, Result, bail, ensure};
 use hotstuff_types::node::NodeID;
 use std::fmt::Debug;
@@ -7,15 +7,11 @@ use std::fmt::Debug;
 type Invariant<CS> = Box<dyn FnMut(&Context<'_, CS>) -> Result<()>>;
 type Stop<CS> = Box<dyn FnMut(&Context<'_, CS>) -> bool>;
 
-type Hook<CS> = Box<dyn FnMut(&Context<'_, CS>)>;
-
 pub struct Env<CS: ManualClock, DP: DeliveryPolicy<CS>> {
     adversary: Adversary<CS, DP>,
     invariants: Vec<Invariant<CS>>,
     stop: Stop<CS>,
     deadline: Option<CS::Clock>,
-    before_tick_hook: Option<Hook<CS>>,
-    after_tick_hook: Option<Hook<CS>>,
 }
 
 impl<CS: ManualClock> Env<CS, StableDelay> {
@@ -25,8 +21,6 @@ impl<CS: ManualClock> Env<CS, StableDelay> {
             invariants: Vec::new(),
             stop: Box::new(|_| false),
             deadline: None,
-            before_tick_hook: None,
-            after_tick_hook: None,
         }
     }
 }
@@ -38,8 +32,6 @@ impl<CS: ManualClock, DP: DeliveryPolicy<CS>> Env<CS, DP> {
             invariants: self.invariants,
             stop: self.stop,
             deadline: self.deadline,
-            before_tick_hook: self.before_tick_hook,
-            after_tick_hook: self.after_tick_hook,
         }
     }
 
@@ -62,16 +54,6 @@ impl<CS: ManualClock, DP: DeliveryPolicy<CS>> Env<CS, DP> {
         self.deadline = Some(deadline);
         self
     }
-
-    pub fn before_tick(mut self, hook: impl FnMut(&Context<'_, CS>) + 'static) -> Self {
-        self.before_tick_hook = Some(Box::new(hook));
-        self
-    }
-
-    pub fn after_tick(mut self, hook: impl FnMut(&Context<'_, CS>) + 'static) -> Self {
-        self.after_tick_hook = Some(Box::new(hook));
-        self
-    }
 }
 
 pub struct Runner<CS: ManualClock> {
@@ -86,8 +68,19 @@ where
         Self { sim }
     }
 
-    pub fn crash(&mut self, node_id: NodeID) {
-        self.sim.crash(node_id);
+    pub fn stop_node(&mut self, node_id: NodeID) -> Result<NodeStorage> {
+        self.sim.stop_node(node_id)
+    }
+
+    pub fn recover_node<DP: DeliveryPolicy<CS>>(
+        &mut self,
+        node_id: NodeID,
+        storage: NodeStorage,
+        env: &mut Env<CS, DP>,
+    ) -> Result<()> {
+        self.sim
+            .recover_node(node_id, storage, &mut env.adversary.delivery)?;
+        self.check(env)
     }
 
     pub fn note(&mut self, note: String) {
@@ -108,8 +101,26 @@ where
 
     /// Repeated runs of a scenario must declare the same Byzantine nodes.
     pub fn run<DP: DeliveryPolicy<CS>>(&mut self, env: &mut Env<CS, DP>) -> Result<()> {
+        self.run_inner(env, None)
+    }
+
+    pub fn run_until<DP: DeliveryPolicy<CS>>(
+        &mut self,
+        at: CS::Clock,
+        env: &mut Env<CS, DP>,
+    ) -> Result<()> {
+        ensure!(at >= self.state().now(), "cannot run backwards to {at:?}");
+        self.run_inner(env, Some(at))
+    }
+
+    fn run_inner<DP: DeliveryPolicy<CS>>(
+        &mut self,
+        env: &mut Env<CS, DP>,
+        until: Option<CS::Clock>,
+    ) -> Result<()> {
         let committee_size = self.sim.state().committee_size();
-        env.adversary.prepare_behaviors(committee_size, &self.sim.rng)?;
+        env.adversary
+            .prepare_behaviors(committee_size, &self.sim.rng)?;
         for id in env.adversary.byzantine.keys() {
             ensure!(
                 env.adversary.byzantine_nodes.contains(id),
@@ -124,29 +135,39 @@ where
         }
         self.sim.trace_behaviors(&env.adversary);
         self.check(env)?;
-        while !(env.stop)(&self.sim.context(&env.adversary.byzantine_nodes)) {
-            let now = self.sim.state().now();
-            match (self.sim.state().next_time(), env.deadline) {
-                (None, _) => bail!("stalled at {now:?}: no events, no timers"),
-                (Some(at), Some(deadline)) if at > deadline => {
-                    bail!("condition not reached by {deadline:?}, now {now:?}")
-                }
-                _ => {}
+        loop {
+            if self.maybe_stop(env, until)? {
+                break;
             }
-
-            if let Some(hook) = &mut env.before_tick_hook {
-                hook(&self.sim.context(&env.adversary.byzantine_nodes));
-            }
-
             self.sim.tick(&mut env.adversary)?;
-
-            if let Some(hook) = &mut env.after_tick_hook {
-                hook(&self.sim.context(&env.adversary.byzantine_nodes));
-            }
-
             self.check(env)?;
         }
         Ok(())
+    }
+
+    fn maybe_stop<DP: DeliveryPolicy<CS>>(
+        &mut self,
+        env: &mut Env<CS, DP>,
+        until: Option<CS::Clock>,
+    ) -> Result<bool> {
+        if let Some(at) = until {
+            if self.state().next_time().is_none_or(|next| next > at) {
+                self.sim.advance_to(at);
+                self.check(env)?;
+                return Ok(true);
+            }
+        } else if (env.stop)(&self.sim.context(&env.adversary.byzantine_nodes)) {
+            return Ok(true);
+        }
+        let now = self.sim.state().now();
+        match (self.sim.state().next_time(), env.deadline) {
+            (None, _) => bail!("stalled at {now:?}: no events, no timers"),
+            (Some(at), Some(deadline)) if at > deadline => {
+                bail!("condition not reached by {deadline:?}, now {now:?}")
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn check<DP: DeliveryPolicy<CS>>(&self, env: &mut Env<CS, DP>) -> Result<()> {

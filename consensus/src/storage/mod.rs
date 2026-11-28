@@ -4,14 +4,34 @@ pub mod staged;
 
 pub use kv::KVError;
 
+use crate::network::message::Envelope;
 use crate::protocol::driver::DriverInput;
 use crate::types::View;
 use crate::types::block::{Block, Command};
 use crate::types::certificate::{BlockQC, SignedVote, SignedWish, TimeoutQC};
+use codec::{Decode, Encode};
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
 
+#[derive(Encode, Decode)]
+pub struct LastEffects<S: Scheme, C: Command> {
+    pub net: Vec<Envelope<S, C>>,
+    pub sync: Vec<S::Digest>,
+    pub committed: Vec<Block<S, C>>,
+}
+
+impl<S: Scheme, C: Command> Clone for LastEffects<S, C> {
+    fn clone(&self) -> Self {
+        Self {
+            net: self.net.clone(),
+            sync: self.sync.clone(),
+            committed: self.committed.clone(),
+        }
+    }
+}
+
 pub trait ReadStorage<S: Scheme, C: Command> {
+    fn get_last_effects(&self) -> Result<Option<LastEffects<S, C>>, KVError>;
     fn get_block_by_hash(&self, hash: &S::Digest) -> Result<Option<Block<S, C>>, KVError>;
     fn get_block_qc(&self, view: View) -> Result<Option<BlockQC<S>>, KVError>;
     fn get_timeout_qc(&self, view: View) -> Result<Option<TimeoutQC<S>>, KVError>;
@@ -104,6 +124,7 @@ pub trait WriteStorage<S: Scheme, C: Command> {
     ) -> Result<(), KVError>;
     fn clear_inputs_up_to_view(&mut self, view: View) -> Result<(), KVError>;
     fn clear_inputs_for_block(&mut self, hash: S::Digest) -> Result<(), KVError>;
+    fn update_last_effects(&mut self, effects: &LastEffects<S, C>) -> Result<(), KVError>;
 }
 
 pub trait ReadWriteStorage<S: Scheme, C: Command>: ReadStorage<S, C> + WriteStorage<S, C> {

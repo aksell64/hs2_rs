@@ -1,5 +1,5 @@
 use crate::protocol::driver::DriverInput;
-use crate::storage::{KVError, ReadStorage, Storage, WriteStorage};
+use crate::storage::{KVError, LastEffects, ReadStorage, Storage, WriteStorage};
 use crate::types::View;
 use crate::types::block::{Block, Command};
 use crate::types::certificate::{BlockQC, SignedVote, SignedWish, TimeoutQC};
@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 pub struct StagedStorage<'a, S: Scheme, C: Command, DB: Storage<S, C>> {
     storage: &'a DB,
     batch: DB::WriteBatch,
+    last_effects: Option<LastEffects<S, C>>,
     blocks: HashMap<S::Digest, Block<S, C>>,
     block_qcs: HashMap<View, BlockQC<S>>,
     timeout_qcs: HashMap<View, TimeoutQC<S>>,
@@ -41,6 +42,7 @@ impl<'a, S: Scheme, C: Command, DB: Storage<S, C>> StagedStorage<'a, S, C, DB> {
         Self {
             storage,
             batch: storage.new_write_batch(),
+            last_effects: None,
             blocks: HashMap::new(),
             block_qcs: HashMap::new(),
             timeout_qcs: HashMap::new(),
@@ -74,6 +76,13 @@ impl<'a, S: Scheme, C: Command, DB: Storage<S, C>> StagedStorage<'a, S, C, DB> {
 }
 
 impl<S: Scheme, C: Command, DB: Storage<S, C>> ReadStorage<S, C> for StagedStorage<'_, S, C, DB> {
+    fn get_last_effects(&self) -> Result<Option<LastEffects<S, C>>, KVError> {
+        match &self.last_effects {
+            Some(effects) => Ok(Some(effects.clone())),
+            None => self.storage.get_last_effects(),
+        }
+    }
+
     fn get_block_by_hash(&self, hash: &S::Digest) -> Result<Option<Block<S, C>>, KVError> {
         match self.blocks.get(hash) {
             Some(block) => Ok(Some(block.clone())),
@@ -317,6 +326,12 @@ impl<S: Scheme, C: Command, DB: Storage<S, C>> ReadStorage<S, C> for StagedStora
 }
 
 impl<S: Scheme, C: Command, DB: Storage<S, C>> WriteStorage<S, C> for StagedStorage<'_, S, C, DB> {
+    fn update_last_effects(&mut self, effects: &LastEffects<S, C>) -> Result<(), KVError> {
+        self.batch.update_last_effects(effects)?;
+        self.last_effects = Some(effects.clone());
+        Ok(())
+    }
+
     fn insert_block(&mut self, block: &Block<S, C>) -> Result<(), KVError> {
         // todo:  cloning the full block, its slow
         self.blocks.insert(block.hash, block.clone());
