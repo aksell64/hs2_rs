@@ -81,22 +81,23 @@ impl<
         node_id: NodeID,
     ) -> Result<(Self, Client<C>), NodeError> {
         let notary = Notary::new(Arc::new(scheme));
-        let state = NodeState::new(
+        let (state, effects) = NodeState::new(
             notary, db, mempool, node_id, source, timeouts, leaders, genesis,
         )?;
         let (cmd_tx, cmd_rc) = mpsc::unbounded_channel();
 
-        Ok((
-            Node {
-                network,
-                blocksync,
-                timers,
-                state,
-                out,
-                cmd_ch: cmd_rc,
-            },
-            Client { tx: cmd_tx },
-        ))
+        let mut node = Node {
+            network,
+            blocksync,
+            timers,
+            state,
+            out,
+            cmd_ch: cmd_rc,
+        };
+
+        node.execute_effects(effects);
+
+        Ok((node, Client { tx: cmd_tx }))
     }
 
     pub async fn run(mut self) -> Result<(), NodeError> {

@@ -3,11 +3,13 @@ use crate::simulator::adversary::{
 };
 use crate::simulator::byzantine::{ByzantineContext, ByzantineProxy, chained_proxy};
 use crate::simulator::clock::Timeline;
+use crate::simulator::dsl::COMMAND_SPACE;
 use crate::simulator::rng::Randomness;
 use crate::simulator::trace::{Snapshot, Trace, describe, node};
 use crate::simulator::viewer::NodeSnapshot;
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use codec::{DecodeAll, Encode};
+use hotstuff_consensus::mocks::genesis::genesis_config;
 use hotstuff_consensus::mocks::kv::MemoryKV;
 use hotstuff_consensus::mocks::mempool::TestMempool;
 use hotstuff_consensus::mocks::scheme::{TestCommand, TestDigest, TestScheme};
@@ -23,14 +25,18 @@ use hotstuff_consensus::timer::service::{TimerCommand, TimerEvent};
 use hotstuff_consensus::types::View;
 use hotstuff_consensus::types::block::Block;
 use hotstuff_consensus::types::clock::{Clock, ClockSource};
+use hotstuff_consensus::types::crypto::Notary;
 use hotstuff_types::node::NodeID;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::sync::Arc;
+
+pub type NodeStorage = KVStorage<MemoryKV<Vec<u8>, Vec<u8>>>;
 
 pub type Replica<CS> = NodeState<
     TestScheme,
     TestCommand,
-    KVStorage<MemoryKV<Vec<u8>, Vec<u8>>>,
+    NodeStorage,
     TestMempool,
     FixedPolicy<<CS as ClockSource>::Clock>,
     CS,
@@ -142,7 +148,6 @@ impl<CS: ClockSource> Context<'_, CS> {
             .filter(|id| !self.is_byzantine(*id))
     }
 
-
     pub fn is_byzantine(&self, node_id: NodeID) -> bool {
         self.byzantine.contains(&node_id)
     }
@@ -174,6 +179,10 @@ impl<CS: ClockSource> Context<'_, CS> {
 impl<CS: ClockSource> GlobalState<CS> {
     pub fn committee_size(&self) -> u32 {
         self.committee_size
+    }
+
+    pub fn clock(&self) -> &CS {
+        &self.clock
     }
 
     pub fn now(&self) -> CS::Clock {
@@ -277,6 +286,7 @@ pub type Duration<CS> = <<CS as ClockSource>::Clock as Clock>::Duration;
 
 pub struct Simulator<CS: ClockSource> {
     state: GlobalState<CS>,
+    timeouts: FixedPolicy<CS::Clock>,
     trace: Option<Trace>,
     pub rng: Randomness,
     next_message_id: u64,
@@ -292,6 +302,7 @@ where
         nodes: BTreeMap<NodeID, Replica<CS>>,
         starts: BTreeMap<NodeID, CS::Clock>,
         stable_net_delay: Duration<CS>,
+        timeouts: FixedPolicy<CS::Clock>,
         rng: Randomness,
         trace: Option<Trace>,
     ) -> Self {
@@ -312,6 +323,7 @@ where
                 commits: BTreeMap::new(),
                 view_timeouts: 0,
             },
+            timeouts,
             trace,
             rng,
             next_message_id: 0,
@@ -394,10 +406,79 @@ where
         &self.state
     }
 
-    pub fn crash(&mut self, node_id: NodeID) {
-        self.state.nodes.remove(&node_id);
-        self.state.unstarted.remove(&node_id);
+    pub fn advance_to(&mut self, at: CS::Clock) {
+        assert!(self.state.next_time().is_none_or(|next| next > at));
+        self.state.timeline.advance_to(at);
+        self.state.clock.set(at);
+    }
+
+    pub fn stop_node(&mut self, node_id: NodeID) -> Result<NodeStorage> {
+        let replica = self
+            .state
+            .nodes
+            .remove(&node_id)
+            .with_context(|| format!("cannot stop {node_id:?}: node is not running"))?;
+        let storage = replica.into_storage();
         self.state.timers.remove(&node_id);
+        self.state.timeline.cancel_sync(node_id);
+        if let Some(trace) = &mut self.trace {
+            let now = self.state.now();
+            trace.step(now, node_id, "stop", &no_effects::<CS::Clock>(), None);
+            trace
+                .viewer
+                .begin(now, Some(node_id), "stop", "stop".to_owned());
+        }
+        self.record_nodes();
+        Ok(storage)
+    }
+
+    pub fn recover_node<DP: DeliveryPolicy<CS>>(
+        &mut self,
+        node_id: NodeID,
+        storage: NodeStorage,
+        policy: &mut DP,
+    ) -> Result<()> {
+        let n = self.state.committee_size;
+        ensure!(
+            u32::from(node_id) < n,
+            "{node_id:?} is outside the committee"
+        );
+        ensure!(
+            !self.state.nodes.contains_key(&node_id)
+                && !self.state.unstarted.contains_key(&node_id),
+            "{node_id:?} is already present in the simulator"
+        );
+        let view = ReadStorage::<TestScheme, TestCommand>::get_cur_view(&storage)?;
+        let mempool = TestMempool::new(u64::from(u32::from(node_id)) * COMMAND_SPACE + view + 1);
+        let (replica, effects) = NodeState::new(
+            Notary::new(Arc::new(TestScheme {
+                n,
+                id: Some(node_id),
+            })),
+            storage,
+            mempool,
+            node_id,
+            self.state.clock.clone(),
+            FixedPolicy {
+                view_timeout: self.timeouts.view_timeout,
+                lock_timeout: self.timeouts.lock_timeout,
+            },
+            RoundRobin::new(n),
+            genesis_config(n, "sim"),
+        )?;
+        self.state.nodes.insert(node_id, replica);
+        self.state.timers.insert(node_id, TimerQueue::new());
+        let now = self.state.now();
+        let snapshot = self.snapshot(node_id);
+        if let Some(trace) = &mut self.trace {
+            trace.step(now, node_id, "recover", &effects, snapshot);
+            trace
+                .viewer
+                .begin(now, Some(node_id), "recover", "recover".to_owned());
+        }
+        self.execute_effects(now, node_id, effects, policy)?;
+        self.record_nodes();
+        Ok(())
     }
 
     pub fn note(&mut self, note: String) {
@@ -647,6 +728,9 @@ where
         effects: Effects<TestScheme, TestCommand, CS::Clock>,
         policy: &mut DP,
     ) -> Result<()> {
+        if !self.state.nodes.contains_key(&node_id) {
+            return Ok(());
+        }
         for envelope in effects.net {
             let bytes = envelope.msg.encode();
             let recipients: Vec<NodeID> = match envelope.to {
@@ -725,6 +809,21 @@ where
         if !effects.committed.is_empty() {
             let log = self.state.commits.entry(node_id).or_default();
             for block in effects.committed {
+                if log
+                    .last()
+                    .is_some_and(|commit| commit.height >= block.height)
+                {
+                    let previous = log
+                        .iter()
+                        .find(|commit| commit.height == block.height)
+                        .context("replayed commit is missing from the commit log")?;
+                    ensure!(
+                        previous.hash == block.hash,
+                        "{node_id:?} replayed a conflicting commit at height {}",
+                        block.height
+                    );
+                    continue;
+                }
                 log.push(Commit {
                     at: now,
                     height: block.height,

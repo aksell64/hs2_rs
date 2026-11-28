@@ -10,9 +10,9 @@ use crate::types::certificate::{BlockQC, TimeoutQC};
 use crate::types::clock::{Clock, ClockSource};
 use crate::types::crypto::Notary;
 use crate::types::wish::Wish;
+use codec::{Decode, Encode};
 use hotstuff_crypto::sign::Scheme;
 use hotstuff_types::node::NodeID;
-use std::collections::BTreeSet;
 
 pub enum PacemakerInput<S: Scheme> {
     ReceivedQC(BlockQC<S>),
@@ -22,13 +22,13 @@ pub enum PacemakerInput<S: Scheme> {
     ReceivedStatus(Status<S>),
 }
 
+#[derive(Encode, Decode)]
 pub struct Status<S: Scheme> {
     pub sender: NodeID,
     pub qc: BlockQC<S>,
     pub view: View,
 }
 
-#[cfg(any(test, feature = "testing"))]
 impl<S: Scheme> Clone for Status<S> {
     fn clone(&self) -> Self {
         Self {
@@ -68,11 +68,6 @@ impl<S: Scheme, C: Command, CL: Clock> PacemakerResult<S, C, CL> {
 pub struct Pacemaker<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy> {
     notary: Notary<S>,
     id: NodeID,
-    statuses: BTreeSet<NodeID>,
-    sent_wish: BTreeSet<View>,
-    relayed_tc: BTreeSet<View>,
-    scheduled_epoch: Option<View>,
-    lock_expired: View,
     source: CS,
     policy: TP,
     leaders: LP,
@@ -87,11 +82,6 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         Self {
             notary,
             id,
-            statuses: BTreeSet::from([id]),
-            sent_wish: BTreeSet::new(),
-            relayed_tc: BTreeSet::new(),
-            scheduled_epoch: None,
-            lock_expired: 0,
             source,
             policy,
             leaders,
@@ -157,15 +147,15 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         }
         storage.update_cur_view(view)?;
         storage.update_cur_leader(self.leader(view))?;
-        self.statuses = BTreeSet::from([self.id]);
+        storage.clear_statuses(previous)?;
         let start = self.source.now();
         let mut timers = vec![
             Effect::Timer(TimerCommand::ClearLockTimer(previous)),
             Effect::Timer(TimerCommand::ClearViewTimersBelow(view)),
         ];
         let epoch = self.leaders.epoch_of(view);
-        if self.scheduled_epoch < Some(epoch) {
-            self.scheduled_epoch = Some(epoch);
+        if storage.get_scheduled_epoch()? < Some(epoch) {
+            storage.update_scheduled_epoch(epoch)?;
             let deadlines = self.policy.epoch_deadlines(
                 self.leaders.epoch_start(view),
                 view..=self.leaders.epoch_end(view),
@@ -192,6 +182,7 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
             if self.can_propose(storage, view)? {
                 return Ok(PacemakerResult::new(PacemakerOutput::ProposeNow(view)));
             }
+            storage.insert_status(self.id, view)?;
             let lock = self.policy.lock_deadline(view, start);
             let lock_timer = Effect::Timer(TimerCommand::SetLockTimer(lock));
             return Ok(PacemakerResult::new(PacemakerOutput::ViewAdvanced(view))
@@ -214,7 +205,7 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
     ) -> Result<bool, KVError> {
         Ok(view == storage.get_cur_view()?
             && self.is_leader(view)
-            && (storage.get_high_qc()?.view() + 1 == view || self.lock_expired == view))
+            && (storage.get_high_qc()?.view() + 1 == view || storage.get_lock_expired()? == view))
     }
 
     fn on_lock_timer_expired<C: Command, DB: ReadWriteStorage<S, C>>(
@@ -225,7 +216,7 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         if view != storage.get_cur_view()? || !self.is_leader(view) {
             return Ok(PacemakerResult::new(PacemakerOutput::NoPacemakerOutput));
         }
-        self.lock_expired = view;
+        storage.update_lock_expired(view)?;
         Ok(PacemakerResult::new(PacemakerOutput::ProposeNow(view)))
     }
 
@@ -241,9 +232,10 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         if !self.leaders.is_epoch_start(next) {
             return self.advance_view(storage, next);
         }
-        if !self.sent_wish.insert(next) {
+        if storage.exists_wish(next)? {
             return Ok(PacemakerResult::new(PacemakerOutput::NoPacemakerOutput));
         }
+        storage.insert_wish(next)?;
         let Some(wish) = self.notary.sign(Wish { view: next }) else {
             return Ok(PacemakerResult::new(PacemakerOutput::NoPacemakerOutput));
         };
@@ -259,9 +251,10 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         storage: &mut DB,
         tc: TimeoutQC<S>,
     ) -> PacemakerApply<S, C, CS::Clock> {
-        if !self.notary.verify_qc(&tc) || !self.relayed_tc.insert(tc.view()) {
+        if !self.notary.verify_qc(&tc) || storage.exists_relayed_tc(tc.view())? {
             return Ok(PacemakerResult::new(PacemakerOutput::NoPacemakerOutput));
         }
+        storage.insert_relayed_tc(tc.view())?;
         let leaders = self.leaders.epoch_leaders(tc.view());
         let relay = if leaders.contains(&self.id) {
             vec![send_to(Recipient::All, Message::TCMsg(tc.clone()))]
@@ -277,9 +270,39 @@ impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
         storage: &mut DB,
         status: Status<S>,
     ) -> PacemakerApply<S, C, CS::Clock> {
-        if !self.is_leader(status.view) {
+        if !self.is_leader(status.view) || !self.notary.verify_qc(&status.qc) {
             return Ok(PacemakerResult::new(PacemakerOutput::NoPacemakerOutput));
         }
-        self.process_qc(storage, status.qc)
+        let result = self.process_qc(storage, status.qc)?;
+        if status.view == storage.get_cur_view()? {
+            storage.insert_status(status.sender, status.view)?;
+        }
+        Ok(result)
+    }
+}
+
+impl<S: Scheme, TP: TimeoutPolicy<CS::Clock>, CS: ClockSource, LP: LeaderPolicy>
+    crate::protocol::traits::Pacemaker<S> for Pacemaker<S, TP, CS, LP>
+{
+    type Clock = CS::Clock;
+
+    fn apply<C: Command, DB: ReadWriteStorage<S, C>>(
+        &mut self,
+        storage: &mut DB,
+        event: PacemakerInput<S>,
+    ) -> PacemakerApply<S, C, Self::Clock> {
+        Pacemaker::apply(self, storage, event)
+    }
+
+    fn leader(&self, view: View) -> NodeID {
+        Pacemaker::leader(self, view)
+    }
+
+    fn is_leader(&self, view: View) -> bool {
+        Pacemaker::is_leader(self, view)
+    }
+
+    fn is_epoch_leader(&self, view: View) -> bool {
+        Pacemaker::is_epoch_leader(self, view)
     }
 }

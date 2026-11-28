@@ -115,7 +115,9 @@ impl Trace {
     }
 
     pub fn note(&mut self, note: String) {
-        self.notes.push(note);
+        if !self.notes.contains(&note) {
+            self.notes.push(note);
+        }
     }
 
     pub fn mark<CL: Debug>(&mut self, at: CL, label: &str) {

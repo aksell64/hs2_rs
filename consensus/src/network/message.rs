@@ -17,6 +17,22 @@ pub enum Message<S: Scheme, C: Command> {
     QCMsg(BlockQC<S>),
 }
 
+impl<S: Scheme, C: Command> Clone for Message<S, C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::ProposalMsg(proposal) => Self::ProposalMsg(proposal.clone()),
+            Self::VoteMsg(vote) => Self::VoteMsg(vote.clone()),
+            Self::WishMsg(wish) => Self::WishMsg(wish.clone()),
+            Self::StatusMsg { qc, view } => Self::StatusMsg {
+                qc: qc.clone(),
+                view: *view,
+            },
+            Self::TCMsg(tc) => Self::TCMsg(tc.clone()),
+            Self::QCMsg(qc) => Self::QCMsg(qc.clone()),
+        }
+    }
+}
+
 impl<S: Scheme, C: Command> Message<S, C> {
     pub fn into_event(self, sender: NodeID) -> DriverInput<S, C> {
         match self {
@@ -30,12 +46,23 @@ impl<S: Scheme, C: Command> Message<S, C> {
     }
 }
 
+#[derive(Clone, Copy, Encode, Decode)]
 pub enum Recipient {
     All,
     Node(NodeID),
 }
 
+#[derive(Encode, Decode)]
 pub struct Envelope<S: Scheme, C: Command> {
     pub to: Recipient,
     pub msg: Message<S, C>,
+}
+
+impl<S: Scheme, C: Command> Clone for Envelope<S, C> {
+    fn clone(&self) -> Self {
+        Self {
+            to: self.to,
+            msg: self.msg.clone(),
+        }
+    }
 }

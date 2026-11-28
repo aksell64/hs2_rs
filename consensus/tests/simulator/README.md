@@ -55,8 +55,14 @@ violation, if any; a failed trace opens at its last step, marked with a red line
 simulator, so it is a `sync` tag on the step and not an arrow; the step label and the `Progress` card count the
 blocks that were already stored. QCs have no signers, because a threshold signature does not reveal them.
 
-Give each Byzantine handler a display name, for example
-`ByzantineProxy::new("eviction", with_probability(70), eviction_behavior())`.
+Behavior factories in `byzantine_behaivors.rs` return a named `ByzantineProxy` with activation enabled
+by default. For conditional activation, set `proxy.activate_when`, for example:
+
+```rust
+let mut proxy = equivocation_proxy();
+proxy.activate_when = Box::new(with_probability::<VirtualClock>(70));
+```
+
 The lane header lists the handlers configured at the selected step; hover to see the full list.
 `no handler` means the node is declared Byzantine but follows the protocol without an override.
 The header describes configuration. Event points show the names of handlers actually called on that step,
@@ -71,13 +77,7 @@ and `honest_commit_logs()`. Safety and liveness checks continue to include it:
 
 ```rust
 let adversary = Adversary::new([3])
-    .mutate_node(NodeSelector::Id(NodeID::from(1)), || {
-        ByzantineProxy::new(
-            "silent",
-            |_: &Context<'_, VirtualClock>| true,
-            |_, _| Ok(no_effects()),
-        )
-    });
+    .mutate_node(NodeSelector::Id(NodeID::from(1)), silent_proxy);
 ```
 
 `Id` must name a non-Byzantine committee member. `All` selects all such members, and `Range(f)` selects
@@ -88,10 +88,9 @@ reusing the same `Env` preserves both the selection and handler state.
 The viewer labels these nodes `mutated` and shows their handlers for the selected step. Mutation
 registrations never add nodes to `Adversary::byzantine_nodes` or the viewer's faulty-node set.
 
-`eviction_with_unlimited_votes_test` runs the eviction scenario with between `1` and `n - f`
-randomly selected mutants. The `unlimited_votes_and_qcs` handler resets `voted_view` before each proposal,
-including replayed proposals, so the node can vote repeatedly within a view. The usual view, lock,
-and proposal validation checks still apply. The mutant count and identities come from the scenario seed.
+`unlimited_votes_proxy(source, policy)` installs `UnlimitedVotesConsensus`, which allows repeated
+votes within the current view while preserving the view, lock, and proposal validation checks.
+`unlimited_votes_and_qcs_proxy(source, policy)` also installs `UnlimitedQCsCollector`.
 
 The same mutants collect votes separately for each `(view, block)`, allowing several QCs for different
 blocks in one view. Each collector keeps the normal quorum threshold and counts each signer only once
@@ -99,33 +98,31 @@ for its block. Vote verification, collector leadership, and buffering of future-
 Every assembled QC is replayed as `NewQC` through the normal driver, including blocksync if needed;
 the mutation does not add a separate QC broadcast or change pacemaker handling of old QCs.
 
-The scenario keeps the same safety and progress checks as `eviction`; violations fail the test and
-produce a trace for inspection. To replay it, use `replay(seed, eviction_with_unlimited_votes)`.
-
-`nonconsecutive_commit()` disables only the requirement that the two QCs used for a commit have
+`nonconsecutive_commit_proxy(source, policy)` installs `NonconsecutiveCommitConsensus` and disables
+only the requirement that the two QCs used for a commit have
 consecutive views. It keeps normal voting, lock updates, block validation, and the check that a commit
-extends the executed chain. The handler lives entirely in the simulator: after normal processing of
-a validated proposal or synced block, it applies the relaxed commit rule to the stored chain and adds
-any additional commits to storage and the returned effects. Buffered proposals are handled on replay:
+extends the executed chain. The component handles `ConsensusInput::Update`; the driver persists and
+returns its commits through the normal processing path, including replayed inputs:
 
 ```rust
+let fork_source = setup.state().clock().clone();
+let commit_source = fork_source.clone();
 let adversary = Adversary::new([3])
-    .byzantine_node(NodeSelector::All, || {
-        ByzantineProxy::new(
-            "tail_fork",
-            |_: &Context<'_, VirtualClock>| true,
-            tail_fork(),
+    .byzantine_node(NodeSelector::All, move || {
+        tail_fork_proxy(
+            fork_source.clone(),
+            FixedPolicy { view_timeout, lock_timeout },
         )
     })
-    .mutate_node(NodeSelector::Id(NodeID::from(1)), || {
-        ByzantineProxy::new(
-            "nonconsecutive_commit",
-            |_: &Context<'_, VirtualClock>| true,
-            nonconsecutive_commit(),
+    .mutate_node(NodeSelector::Id(NodeID::from(1)), move || {
+        nonconsecutive_commit_proxy(
+            commit_source.clone(),
+            FixedPolicy { view_timeout, lock_timeout },
         )
     });
 ```
 
-The existing `tail_fork()` handler replaces a leader's proposal with a block built on its locked QC
-when that QC is older than the proposal's justify. This can exercise view gaps; conflicting commits
-still require an appropriate message schedule and competing branches.
+`tail_fork_proxy(source, policy)` installs `TailForkConsensus`. When creating a proposal, the component
+passes the QC carried by the block certified by `high_qc` to the normal consensus implementation,
+creating a sibling of that certified block. It uses the previous QC along the chain even when views
+have gaps, and leaves proposals over genesis unchanged.

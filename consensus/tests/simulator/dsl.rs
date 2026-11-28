@@ -37,7 +37,7 @@ pub fn with_probability<CS: ClockSource>(percent: u64) -> impl FnMut(&Context<'_
     move |ctx| ctx.randomness.chance(percent)
 }
 
-const COMMAND_SPACE: u64 = 1_000_000;
+pub(super) const COMMAND_SPACE: u64 = 1_000_000;
 
 #[derive(Clone, Default)]
 pub struct VirtualClock(Arc<AtomicU64>);
@@ -132,7 +132,7 @@ impl Setup {
             if self.crashed.contains(&id) {
                 continue;
             }
-            let replica = NodeState::new(
+            let (replica, _) = NodeState::new(
                 Notary::new(Arc::new(TestScheme {
                     n: self.n,
                     id: Some(id),
@@ -174,6 +174,10 @@ impl Setup {
             nodes,
             starts,
             self.delay,
+            FixedPolicy {
+                view_timeout: self.view_timeout,
+                lock_timeout: self.lock_timeout,
+            },
             self.rng.clone(),
             trace,
         ))
@@ -247,7 +251,9 @@ pub fn random_seeds(count: usize) -> Vec<u64> {
 
 /// Pass the scenario function directly so its name is available for the trace.
 pub fn replay(seed: u64, scenario: impl FnOnce(u64, bool) -> Result<()>) -> Result<()> {
-    with_name(std::any::type_name_of_val(&scenario), || scenario(seed, true))
+    with_name(std::any::type_name_of_val(&scenario), || {
+        scenario(seed, true)
+    })
 }
 
 pub fn for_each_seed(seeds: &[u64], test: impl Fn(u64, bool) -> Result<()>) -> Result<()> {

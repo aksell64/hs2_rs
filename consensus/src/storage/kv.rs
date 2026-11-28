@@ -72,4 +72,5 @@ pub trait KV: Send + Sync + 'static {
 pub trait KVBatch<K, V> {
     fn set(&mut self, key: K, value: V);
     fn remove(&mut self, key: K);
+    fn remove_range(&mut self, from: K, to: K);
 }

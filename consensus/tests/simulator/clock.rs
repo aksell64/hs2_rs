@@ -1,5 +1,6 @@
 use crate::simulator::simulator::Event;
 use hotstuff_consensus::types::clock::Clock;
+use hotstuff_types::node::NodeID;
 use std::collections::{BTreeMap, VecDeque};
 
 pub struct Timeline<CL: Clock> {
@@ -21,6 +22,14 @@ impl<CL: Clock> Timeline<CL> {
 
     pub fn add_event(&mut self, event: Event, fired_at: CL) {
         self.queue.entry(fired_at).or_default().push_back(event);
+    }
+
+    pub fn cancel_sync(&mut self, id: NodeID) {
+        self.queue.retain(|_, events| {
+            events
+                .retain(|event| !matches!(event, Event::Synced { node_id, .. } if *node_id == id));
+            !events.is_empty()
+        });
     }
 
     pub fn next_time(&self) -> Option<CL> {
